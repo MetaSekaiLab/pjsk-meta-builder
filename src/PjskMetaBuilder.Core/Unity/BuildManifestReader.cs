@@ -10,6 +10,7 @@ public sealed record BuildTag(string Raw, string ClientVersion, string DataVersi
 /// CP 服（jp）的 dataVersion 不在 production_android 里（那里是占位的 1.0.0.0），
 /// 而在一个名为 JenkinsBuildManifest 的 MonoBehaviour 中：m_Name 之后的第一个字符串形如
 /// <c>tags/7.1.0_7.1.0.10_1007</c>（客户端版本_dataVersion_构建号）。workflow 用正则扫同一字符串。
+/// en 的形如 <c>release/6.1.0_6.1.0.0</c>（分支构建，没有构建号；en 的 production_android 同样是占位的 1.0.0.0）。
 /// Nuverse 服没有这个对象。
 /// </summary>
 public static partial class BuildManifestReader
@@ -19,7 +20,8 @@ public static partial class BuildManifestReader
     private const int MonoBehaviourClassId = 114;
     private const long MaxFileSize = 1 << 20; // 只看小的序列化文件
 
-    [GeneratedRegex(@"^tags/(\d+\.\d+\.\d+)_(\d+\.\d+\.\d+\.\d+)_(\d+)$")]
+    // jp：tags/7.1.0_7.1.0.10_1007（标签构建）；en：release/6.1.0_6.1.0.0（分支构建，没有构建号）
+    [GeneratedRegex(@"^(?:tags|release)/(\d+\.\d+\.\d+)_(\d+\.\d+\.\d+\.\d+)(?:_(\d+))?$")]
     private static partial Regex TagPattern();
 
     public static BuildTag? TryRead(PackageFiles files)

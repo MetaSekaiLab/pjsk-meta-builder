@@ -3,10 +3,11 @@ using PjskMetaBuilder.Core.Keys;
 using PjskMetaBuilder.Core.Metadata;
 using PjskMetaBuilder.Core.Packages;
 using PjskMetaBuilder.Core.Publish;
+using PjskMetaBuilder.Core.Sources;
 using PjskMetaBuilder.Core.Unity;
 
-// 退出码：0 成功；75 网络类或来源未就绪（可重试）；65 数据类失败；64 用法错误；70 内部错误。
-const int ExUsage = 64, ExData = 65, ExSoftware = 70, ExTempFail = 75;
+// 退出码：0 成功；75 网络类或来源未就绪（可重试）；65 数据类失败；64 用法错误；70 内部错误；78 凭据/配置问题（要人处理）。
+const int ExUsage = 64, ExData = 65, ExSoftware = 70, ExTempFail = 75, ExConfig = 78;
 
 try
 {
@@ -14,6 +15,7 @@ try
     {
         "build" => Build(Options.Parse(args[1..])),
         "inspect" => Inspect(Options.Parse(args[1..])),
+        "fetch" => Fetch(Options.Parse(args[1..])),
         "publish" => Publish(Options.Parse(args[1..])),
         "run" => RunAll(Options.Parse(args[1..])),
         _ => Usage(),
@@ -23,6 +25,11 @@ catch (ArgumentException e)
 {
     Console.Error.WriteLine($"参数错误：{e.Message}");
     return ExUsage;
+}
+catch (SourceConfigurationException e)
+{
+    Console.Error.WriteLine($"凭据或配置错误：{e.Message}");
+    return ExConfig;
 }
 catch (SourceNotReadyException e)
 {
@@ -49,12 +56,17 @@ static int Usage()
 {
     Console.Error.WriteLine("""
         用法：
-          pjsk-meta-builder build   --region <jp|cn|…> --apk <主包> [--apk <拆分包> …] --out <目录>
-                                    [--source local] [--expected-version-code N]
+          pjsk-meta-builder build   --region <jp|en|hmt|kr|cn> --out <目录>
+                                    （--apk <主包> [--apk <拆分包> …] | --source <qooapp|official>）
+                                    [--expected-version-code N] [--cache-dir <下载缓存>]
                                     [--il2cppdumper <Il2CppDumper.dll>] [--dotnet <dotnet 路径>] [--keep-work]
+          pjsk-meta-builder fetch   --region <地区> [--source <qooapp|official>] [--expected-version-code N] [--cache-dir …]
           pjsk-meta-builder inspect --apk <主包> [--apk <拆分包> …]
           pjsk-meta-builder publish --region <地区> --dir <build 输出目录> [--repo owner/name|路径] [--branch main] [--dry-run]
           pjsk-meta-builder run     （build 的全部参数）+ [--repo …] [--branch …] [--dry-run]：build 后直接 publish
+
+        不给 --apk 时按地区默认来源下载（cn 官网，其余 QooApp），缓存在 PJSK_CACHE_DIR 或 ~/.cache/pjsk-meta-builder。
+        QooApp 凭据：QOOAPP_TOKEN 或 QOOAPP_TOKEN_FILE（本机也读 ~/.config/qooapp.env）。
 
         publish 通过 GitHub API 读写（不克隆）；写入凭据（--dry-run 不需要）：
           GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY（PEM 内容）或 GITHUB_APP_PRIVATE_KEY_FILE
@@ -103,12 +115,38 @@ static int PublishDir(Options o, string dir)
     return result.Result == "rejected" ? ExData : 0;
 }
 
+static long? ExpectedVersionCode(Options o) =>
+    o.Get("expected-version-code") is { } e ? long.TryParse(e, out var v) ? v : throw new ArgumentException("--expected-version-code 应为整数") : null;
+
+/// <summary>给了 --apk 就用本地文件；否则按 --source（或地区默认来源）下载。</summary>
+static DownloadedPackage Acquire(Options o)
+{
+    if (o.Has("apk"))
+    {
+        if (o.Get("source") is { } s && s != "local")
+            throw new ArgumentException("--apk 和 --source 只能二选一");
+        return new DownloadedPackage("local", o.Apks(), null, null);
+    }
+    var region = Regions.Get(o.Required("region"));
+    var source = PackageSources.Create(o.Get("source"), region, log: m => Console.Error.WriteLine(m));
+    return source.Fetch(region, o.Get("cache-dir") ?? PackageSources.DefaultCacheDir(), ExpectedVersionCode(o));
+}
+
+static int Fetch(Options o)
+{
+    var package = Acquire(o);
+    foreach (var apk in package.Apks)
+        Console.WriteLine(apk);
+    return 0;
+}
+
 static void BuildCore(Options o)
 {
+    var package = Acquire(o);
     var result = MetaBuilder.Build(new BuildRequest(
-        o.Required("region"), o.Apks(), o.Required("out"),
-        o.Get("source") ?? "local",
-        o.Get("expected-version-code") is { } e ? long.Parse(e) : null,
+        o.Required("region"), package.Apks, o.Required("out"),
+        package.Source,
+        ExpectedVersionCode(o),
         o.Get("il2cppdumper") ?? Environment.GetEnvironmentVariable("IL2CPPDUMPER_DLL"),
         o.Get("dotnet"),
         o.Has("keep-work")));
@@ -142,7 +180,7 @@ static int Inspect(Options o)
     Console.WriteLine($"metadata：已解密，{metadata.Length} 字节");
     if (region is not null)
     {
-        var keys = KeyExtractor.Extract(metadata, region.Nuverse);
+        var keys = KeyExtractor.Extract(metadata, region);
         Console.WriteLine($"密钥（SHA-256 前缀）：[0] {KeyExtractor.Fingerprint(keys.Api.Key)}/{KeyExtractor.Fingerprint(keys.Api.Iv)}"
             + (keys.Ab is { } ab ? $"，[1] {KeyExtractor.Fingerprint(ab.Key)}/{KeyExtractor.Fingerprint(ab.Iv)}" : ""));
     }

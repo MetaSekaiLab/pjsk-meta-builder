@@ -176,13 +176,27 @@ masterdata 同步服务（另一个独立项目，Go）需要每个服当前版�
 
 ### 5.1 取得安装包、读清单
 
-- **官网链接（cn）**：`https://pjskyy.ugurl.cn/d9WHL`，用 GET 跟随跳转（HEAD 返回 404），单个 APK，约 586MB，实测跳转到字节的 APK CDN。
-- **QooApp（jp）**：参照 pjsk-reverse-workflow `scripts/qooapp_dl.py`：
-  1. `GET https://api.qoo-app.com/store/v11/apps/<条目id>` → packageId、apk.versionCode/versionName、baseApkMd5、splitApks[]；
-  2. 主包 `GET /v11/apps/<包名>/download?type=app`，302 跳转到文件地址；拆分包直接用 splitApks[].url；
-  3. 请求头要带 `X-User-Token`（QooApp token，部署 Secret）等一组客户端头；token 失效时 HTTP 仍是 200，要看 body 里的 code。
-  4. jp 条目 id：9038。
-- **本地文件**：命令行可直接给一个或多个 APK。
+不给 `--apk` 时按地区的默认来源下载：cn 用官网链接，其余（jp、en、hmt、kr）用 QooApp。下载缓存在 `PJSK_CACHE_DIR`（默认 `~/.cache/pjsk-meta-builder`），目录为 `<region>/qooapp-<versionCode>/` 或 `<region>/official-<文件名>/`；已下载且校验一致的文件直接复用，有 `.part` 时用 Range 续传；下载成功后删除同一地区、同一来源的旧版本目录。
+
+- **官网链接（cn）**：`https://pjskyy.ugurl.cn/d9WHL`，两次 302 后到 `lf9-apk.ugapk.cn` 上的单个 APK（约 586MB，文件名里带 versionCode，如 `…_v23509_4647_….apk`）。HEAD 返回 404，所以用 `Range: bytes=0-0` 的 GET 拿最终地址和总大小（`Content-Range`）。官网不给 MD5，只校验大小；版本号要读清单才知道，“来源还没更新”由清单检查判断。
+- **QooApp（jp、en、hmt、kr）**：参照 pjsk-reverse-workflow `scripts/qooapp_dl.py`：
+  1. `GET https://api.qoo-app.com/store/v11/apps/<条目id>` → `packageId`、`isApkReady`、`apk.{versionName, versionCode, baseApkMd5, dataPackNeeded}`、`splitApks[]{url, md5, size}`；
+  2. 主包 `GET /v11/apps/<包名>/download?type=app`，302 跳转到文件地址；拆分包直接用 `splitApks[].url`；
+  3. API 请求带 `X-User-Token` 等一组客户端头；文件下载（`d*.qoo-apk.com`）不带 token。没有 token 时条目接口返回 HTTP 401；body 里的 `code` 为 401/403 同样视为 token 失效；
+  4. 条目 id：jp 9038、en 18337、hmt 18298、kr 20082；
+  5. 版本号在下载前就知道：比期望的 versionCode 旧时直接报“来源未就绪”，不浪费流量；主包和拆分包都校验 MD5（拆分包还校验大小）。
+  6. 2026-11-10 实测：en 6.1.0（109）主包 + 1 个拆分包共 241MB；kr 6.4.0（22011）主包 + 2 个拆分包共 481MB；本机下载分别约 14 秒、27 秒。
+- **跳转**：手动跟随，最多 10 次，只允许 https。
+- **本地文件**：命令行用 `--apk` 给一个或多个 APK，`package.source` 记为 `local`。
+- **错误分类**：
+
+  | 情况 | 类别 | 退出码 |
+  | --- | --- | --- |
+  | 超时、5xx、429、下载中断、大小或 MD5 不一致（文件已删除或保留 .part） | 网络类，可重试 | 75 |
+  | 下载源版本比期望旧、`isApkReady=false`、文件地址 404 | 来源未就绪，稍后重试 | 75 |
+  | 包名不对、需要额外数据包、条目 404 | 数据类 | 65 |
+  | QooApp token 缺失或失效、文件地址 401/403 | 凭据/配置，要人处理 | 78 |
+
 - **不合并拆分包**：把主包和拆分包当作一个虚拟文件系统按路径查找（`lib/arm64-v8a/libil2cpp.so` 在 arm64 拆分包里，`assets/bin/Data/...` 在主包里）。这样就不需要 APKEditor（Java）。
 - **读清单**：自己解析二进制 AndroidManifest.xml（AXML）的字符串池和 manifest 元素属性，取 package、versionName、versionCode，不依赖 aapt2。sssekai 的 `apphash.py` 里有字符串池解析可参考。
 - **核对**：包名必须与地区配置一致（jp `com.sega.pjsekai`，cn `com.hermes.mk`）；给了期望 versionCode 时，下载到的更小就失败（下载源还没更新完），由调用方稍后重试。
@@ -210,7 +224,7 @@ masterdata 同步服务（另一个独立项目，Go）需要每个服当前版�
 | jp 7.1.0 | `assets/bin/Data/globalgamemanagers` 里 ResourceManager 的容器 `playersettings/android/production_android`，指向 `assets/bin/Data/6350e2ec327334c8a9b7f494f344a761` 中的对象 | 两个文件在 7.1.0 里都存在（已核对）；容器路径来自 workflow `app_info`，文件名来自 sssekai `PROD_BUNDLES` |
 | cn 6.4.1（Nuverse） | `assets/bin/Data/data.unity3d`（UnityFS 包），在其中找 `m_Name == "production_android"` 的 MonoBehaviour，必须正好一个 | 文件存在（已核对）；查找方式来自 workflow `apk_info` |
 
-- **dataVersion**：production_android 里的 clientData* 字段在 jp 7.1.0 和 cn 6.4.1 上都是占位的 `1.0.0.0`。jp 的真实值在一个名为 `JenkinsBuildManifest` 的 MonoBehaviour 里（m_Name 之后的第一个字符串，形如 `tags/7.1.0_7.1.0.10_1007`，即「客户端版本_dataVersion_构建号」，jp 7.1.0 在 `assets/bin/Data/a18e73db…` 中）。CP 服优先用它，并校验其中的客户端版本与 production_android 一致；Nuverse 服没有这个对象，dataVersion 只能记占位值，真实值以同步服务登录拿到的为准。
+- **dataVersion**：production_android 里的 clientData* 字段在 jp 7.1.0 和 cn 6.4.1 上都是占位的 `1.0.0.0`。jp 的真实值在一个名为 `JenkinsBuildManifest` 的 MonoBehaviour 里（m_Name 之后的第一个字符串，形如 `tags/7.1.0_7.1.0.10_1007`，即「客户端版本_dataVersion_构建号」，jp 7.1.0 在 `assets/bin/Data/a18e73db…` 中）。en 6.1.0 的 production_android 同样是占位值，构建标签是分支构建的形式 `release/6.1.0_6.1.0.0`（没有构建号），同样按「客户端版本_dataVersion」解析。这是安装包内置的 dataVersion，服务器当前的值会更新（例如 en 服务器当前 6.1.1.0），以同步服务从服务器拿到的为准。CP 服优先用它，并校验其中的客户端版本与 production_android 一致；Nuverse 服没有这个对象，dataVersion 只能记占位值，真实值以同步服务登录拿到的为准。
 - cn 6.4.1 的 `bundleIdentifier` 是 `com.sega.pjsekai`（与包名 `com.hermes.mk` 不同，sssekai 也注意到了），只给警告。
 - appHash 必须是 UUID 格式；版本号必须匹配 `\d+(\.\d+)+`。
 - unityVersion 取序列化文件头里的版本。
@@ -232,15 +246,27 @@ masterdata 同步服务（另一个独立项目，Go）需要每个服当前版�
 | --- | --- | --- | --- | --- |
 | jp 7.1.0 | `5B30CBC1…` | `7C1CF10C…` | — | — |
 | hmt 6.4.0 | `BA2B1D52…` | `3673BB77…` | `5B30CBC1…` | `7C1CF10C…` |
-| cn 6.4.1 | `BA2B1D52…` | `3673BB77…`（在 metadata 中按哈希找到并成功解开 master 186） | | |
+| cn 6.4.1 | `BA2B1D52…` | `3673BB77…`（在 metadata 中按哈希找到并成功解开 master 186） | `5B30CBC1…` | `7C1CF10C…` |
+| kr 6.4.0 | `BA2B1D52…` | `3673BB77…` | `5B30CBC1…` | `7C1CF10C…` |
+| en 6.1.0 | `D01AC7F5…` | `2DBB0FDF…`（与 jp 不同；哈希由 sssekai 的 en 密钥算出，在 en 6.1.0 的 metadata 中命中） | — | — |
 
-难点在于：**DummyDll 里没有方法体**，看不到静态构造函数把哪个 `<PrivateImplementationDetails>` 字段赋给了哪个静态字段。可选方案（见 §9 Q1）：
+hmt、kr、cn 三个 Nuverse 服的密钥完全相同（`moe-info.json` 字节相同）；kr 与 hmt 的 appHash 也相同（`d67a688b…`）。
 
-1. 用 Il2CppDumper 的 `script.json` 找到 `APIManager..cctor` 的地址，反汇编这段 arm64 代码，找出它引用的 metadata usage（`Field$<PrivateImplementationDetails>.<哈希>`），按赋值顺序对应到四个字段。
-2. 候选穷举：枚举所有 16 字节的 `<PrivateImplementationDetails>` 字段，用实际数据验证（比如解 CDN 上当前的 master）。
-3. 已知哈希兜底：上表中的哈希命中就直接用，命中不了就报错并人工处理。
+难点在于：**DummyDll 里没有方法体**，看不到静态构造函数把哪个 `<PrivateImplementationDetails>` 字段赋给了哪个静态字段。
 
-第一版可以先用方案 3 跑通，同时实现方案 1，两者结果必须一致。
+**已实现方案 1（反汇编 cctor，自动跟随密钥更换）**，流程（`Keys/KeyResolver.cs`）：
+
+1. 从 Il2CppDumper 的 `script.json` 取 `APIManager..cctor` 的地址（`ScriptMethod` 里 Name 以 `APIManager$$.cctor` 结尾），以及 `Field$<PrivateImplementationDetails>.<哈希>` 的「使用槽 VA → 哈希」映射（`ScriptMetadata`）。script.json 可达数百 MB，用 `Utf8JsonReader` 流式读取，只取这两样。
+2. 自己写了个只认 cctor 里那几种指令的最小 arm64 解码器（`Keys/Arm64CctorReader.cs`，无原生依赖）：按声明顺序，cctor 对每个 byte[] 常量字段做 `new byte[16]` + `RuntimeHelpers.InitializeArray(字段, <PrivateImplementationDetails>.<哈希>)`。解码器追踪寄存器，取出每次 `InitializeArray` 调用的「数据源槽 VA」（InitializeArray 不写死地址：它是所有调用点都带非空且互不相同源槽的那个 `bl` 目标）。
+3. 源槽在文件里是 0，真实目标在 `.rela.dyn` 的 `R_AARCH64_RELATIVE` 重定位 addend 里（`Keys/Elf64.cs` 解析段表和重定位）：源槽 VA → addend → 字段使用槽 VA → 映射到字段哈希。
+4. 按顺序：第 1、2 个是 API 的 key/iv（`dummydata`/`stab`），Nuverse 再加第 3、4 个 ab 的 key/iv（`abdummydata`/`abstab`）。CP 应恰好 2 个、Nuverse 恰好 4 个，否则报错回退。
+5. 拿到有序哈希后，在 metadata 默认值数据区按 SHA-256 取 16 字节（与方案 3 共用 `KeyExtractor.Find`）。
+
+**兜底方案 3（已知哈希表）**：没有 Il2CppDumper 输出（CP 服未传 `--il2cppdumper`），或方案 1 任一步失败时，用上表的已知哈希命中；命中不了报错并人工处理。
+
+**交叉校验**：方案 1 跑通时，把它得到的有序哈希与方案 3 的已知哈希表比对；不同则告警并以反汇编结果为准（说明密钥已更换）。实测 jp、cn、en 三服方案 1 的结果与已知哈希完全一致（en 的密钥与 jp 不同，由反汇编动态定位，证明不是在重认硬编码值）。
+
+> 本机 `~/pjsk-analysis/scripts/.venv` 里的 `resolve_keys.py`（capstone 原型）用于交叉验证 C# 解码器；生产代码不依赖它。
 
 ### 5.6 生成结构文件（Nuverse 服）
 
@@ -296,13 +322,23 @@ masterdata 同步服务（另一个独立项目，Go）需要每个服当前版�
 - `publish` / `run` 已实现。本地裸仓库测试覆盖首发、重复（noop）、旧版本补目录、同版本新构建（`+versionCode` 目录）、拒绝、已存在目录属于其他构建时报错、dry-run 不写入、**提交前分支被别人更新后的重试**；`GitHubApiRepository` 用假的 HTTP 处理器测试了请求形状、路径转义（`+`）、`STALE_DATA`、错误分类；JWT 签名有单元测试。
 - 已建公开仓库 `StarMoe-org/moesekai-app-meta` 和 GitHub App `moesekai-bot`（只装在这个仓库上，权限 contents 写 + metadata 读）。验证了 token 只能看到这一个仓库。
 - 首次真实发布（当时还是 git push 方式）：jp 7.1.0（`85f73c6`）、cn 6.4.1（`6606808`），作者和提交者均为 `moesekai-bot[bot]`，但 git push 的提交没有签名，GitHub 上不显示 Verified。之后改为上面的 API 方式；这两个提交保留原样，不改写历史。
-- 改为 API 方式后，对真实仓库验证了只读路径：jp、cn 重复发布判为 `noop`，hmt dry-run（带 token 和匿名各一次）判为 `advanced`，仓库没有新提交。**API 提交的真实写入还没有验证**，下一次发布（hmt）会是第一次。
+- 改为 API 方式后，对真实仓库验证了只读路径：jp、cn 重复发布判为 `noop`，hmt dry-run（带 token 和匿名各一次）判为 `advanced`，仓库没有新提交。随后用 API 真实发布 hmt 6.4.0（`820bd91`）：作者 `moesekai-bot[bot]`、提交者 `web-flow`，GitHub 显示 Verified（reason=valid）；`latest.json` 与 `meta.json` 字节相同。en、kr 还没有安装包，等 M4 下载源。
+
+### 5.9 M4 状态（2026-11-10）
+
+- 下载源已实现：`QooAppSource`、`OfficialUrlSource`、公共的 `Downloader`（跳转、续传、大小和 MD5 校验、错误分类），命令行新增 `fetch`，`build` / `run` 不给 `--apk` 时自动下载。单元测试用假的 HTTP 服务覆盖：主包和拆分包下载与校验、缓存复用与旧版本清理、`.part` 续传、MD5 不一致、版本比期望旧（下载前就失败）、包名不对、token 失效（HTTP 401 和 body code 401 两种）、5xx、官网多次跳转、拒绝跳转到 http。
+- 真实验证：
+  - jp：从 QooApp 下载 7.1.0（300131），`run --dry-run` 判为 `noop`：meta 身份、`moe-info.json` 与已发布的（来自 workflow Release 包）一致；appHash `833770f2…` 与公开的 jp 服务器版本信息一致。
+  - cn：从官网下载 6.4.1（4647，559MB），`run --dry-run` 判为 `noop`，`schema.json`、`moe-info.json` 与已发布的一致。
+  - en、kr：本来没有安装包，从 QooApp 下载后 build 并真实发布：en 6.1.0（`8a17559`）、kr 6.4.0（`e37ab49`），均为 Verified。en 的 appHash `35d80a91…` 与公开的 en 服务器版本信息一致。
+- 为 en 补了两处：构建标签 `release/…` 的格式（§5.3）、en 自己的 API 密钥哈希（§5.5）。
 
 ## 6. 命令行
 
 ```
 pjsk-meta-builder build   --region cn --apk cn.apk [--apk split.apk …] --out ./out
 pjsk-meta-builder build   --region jp --source qooapp [--expected-version-code N] --out ./out
+pjsk-meta-builder fetch   --region en [--source qooapp] [--expected-version-code N]     # 只下载
 pjsk-meta-builder publish --region cn --dir ./out [--dry-run]
 pjsk-meta-builder run     --region cn --source official          # build + publish
 pjsk-meta-builder serve   --listen :8080                         # HTTP 服务（§7）
@@ -311,7 +347,8 @@ pjsk-meta-builder inspect --apk x.apk                            # 只读：清�
 
 - `build` 不需要任何凭据；`--dry-run` 时判定逻辑完全相同，但不提交。有 App 凭据就带 token 读，没有就匿名读公开仓库（匿名 API 每小时 60 次）。
 - `--repo` 可以是 `owner/name`（走 GitHub API）或本地裸仓库路径（走 git 命令行）。
-- 退出码：0 成功；75 网络类失败（可重试）；65 数据类失败；其他为内部错误。
+- 退出码：0 成功；75 网络类失败或来源未就绪（可重试）；65 数据类失败；64 用法错误；78 凭据/配置问题（要人处理）；其他为内部错误。
+- `fetch` 只下载并打印各 APK 路径；`build` / `run` 不给 `--apk` 时先 `fetch`。
 
 ## 7. HTTP 服务
 
@@ -369,7 +406,8 @@ X-Moe-Signature: sha256=<hex(HMAC_SHA256(secret, timestamp + "." + body))>
 | --- | --- | --- |
 | `GITHUB_APP_ID`、`GITHUB_APP_PRIVATE_KEY` | Secret | StarMoe-org 的 App，与同步服务共用 |
 | `MOE_HMAC_SECRET` | Secret | 与同步服务共用 |
-| `QOOAPP_TOKEN` | Secret | jp 下载 |
+| `QOOAPP_TOKEN`（或 `QOOAPP_TOKEN_FILE`） | Secret | jp、en、hmt、kr 下载；可选 `QOOAPP_USER_ID`、`QOOAPP_DEVICE_ID` |
+| `PJSK_CACHE_DIR` | 配置 | 下载缓存目录；服务里放在临时存储上 |
 | `APP_META_REPO` | 配置 | 默认 `StarMoe-org/moesekai-app-meta` |
 | 地区表 | 配置 | 包名、QooApp 条目 id、官网链接、是否 Nuverse |
 
@@ -382,12 +420,13 @@ X-Moe-Signature: sha256=<hex(HMAC_SHA256(secret, timestamp + "." + body))>
 
 | # | 问题 | 当前打算 |
 | --- | --- | --- |
-| Q1 | 密钥字段的定位方法（§5.5） | 先用已知哈希跑通，同时实现「反汇编 `APIManager..cctor`」，两者结果对得上再去掉哈希表 |
+| Q1 | ~~密钥字段的定位方法（§5.5）~~ | **已解决**：反汇编 `APIManager..cctor`（§5.5 方案 1）动态定位密钥字段，能跟随密钥更换；已知哈希表降为兜底 + 交叉校验。jp/cn/en 两法结果一致 |
 | Q2 | ~~`compact*` 表和 SuiteMaster 之外的顶层键怎么描述~~ | **已解决（M2）**：compact 表就是 SuiteMaster 的成员（按列存放的类），见 §4.4；SuiteMaster 之外的表行都是对象，原样输出 |
 | Q3 | Nuverse 服 API 请求实际用 [0] 还是 [1] | 等同步服务拿到 cn 账号 accessToken、实测 `user/auth` 时确认；不影响 builder |
-| Q4 | QooApp 上 jp 的分包里，`assets/bin/Data` 是否完整在主包 | 用真实下载验证；不完整就按虚拟文件系统在所有分包里查找 |
+| Q4 | ~~QooApp 上 jp 的分包里，`assets/bin/Data` 是否完整在主包~~ | **已解决（M4）**：jp 7.1.0 从 QooApp 下载为主包 + 2 个拆分包，按虚拟文件系统查找即可，结果与 workflow Release 包完全一致 |
 | Q5 | AssetsTools.NET 读取没有 typetree 的 MonoBehaviour | 按 §5.3 的固定字段顺序手工读；用 jp 7.1.0、cn 6.4.1 的结果与 workflow（Python）对照 |
-| Q6 | JP2 出网 | 部署前测试 cn 官网链接、QooApp |
+| Q6 | JP2 出网 | 部署前测试 cn 官网链接（`pjskyy.ugurl.cn` → `ugapk.com` → `lf9-apk.ugapk.cn`）、QooApp（`api.qoo-app.com`、`d*.qoo-apk.com`）、GitHub API |
+| Q7 | QooApp token 的有效期 | 本机 token（2026-10-09 保存）在 2026-11-10 仍有效；失效时报凭据错误（退出码 78），同步服务应告警而不是重试 |
 
 ## 10. 测试
 
@@ -396,7 +435,7 @@ X-Moe-Signature: sha256=<hex(HMAC_SHA256(secret, timestamp + "." + body))>
   - 身份：与 workflow `identity.py` / sssekai `apphash` 的结果一致；
   - 密钥：SHA-256 前缀与 §5.5 的表一致；cn 的 [0] 能解开 master 186（PKCS7 正确，424 个顶层键）；
   - 结构文件：与 Haruki 生成器的输出逐类、逐字段比对，差异只能是 §5.6 列出的已知项；用 master 186 逐表核对行宽和类型。
-- **单元测试**：AXML 解析、metadata 解密（用构造数据）、版本比较、更新规则全部分支、0/1 位串编解码、内容检查、HMAC 签名与时间窗、回调重试。
+- **单元测试**：AXML 解析、metadata 解密（用构造数据）、版本比较、更新规则全部分支、0/1 位串编解码、内容检查、下载源（假 HTTP）、密钥反汇编（ELF 重定位解析、手写 arm64 cctor 的源槽识别、script.json 流式解析）、HMAC 签名与时间窗、回调重试。
 - **发布测试**：用本地裸仓库当作产物仓库，覆盖 §4.5 每种情况和分支被别人更新后的重试；GitHub API 部分用假的 HTTP 处理器测试。
 
 ## 11. 里程碑
@@ -404,7 +443,7 @@ X-Moe-Signature: sha256=<hex(HMAC_SHA256(secret, timestamp + "." + body))>
 | 里程碑 | 内容 | 完成标志 |
 | --- | --- | --- |
 | M1 核心（CP） | 虚拟文件系统、AXML、metadata 解密（jp）、身份提取、Il2CppDumper 调用、密钥提取（已知哈希）、`build`/`inspect` | jp 7.1.0 输出的 meta.json 与 workflow 一致，moe-info [0] 哈希正确 |
-| M2 Nuverse | Nuverse 格式 metadata 解密、`data.unity3d` 身份、结构文件生成、密钥 [1]、Q1 反汇编方案 | cn 6.4.1 结构文件与 Haruki 输出比对通过，master 186 逐表核对通过 |
+| M2 Nuverse | Nuverse 格式 metadata 解密、`data.unity3d` 身份、结构文件生成、密钥 [1] | cn 6.4.1 结构文件与 Haruki 输出比对通过，master 186 逐表核对通过 |
 | M3 发布 | GitHub App token、更新规则、内容检查、`publish`/`run` | 本地裸仓库覆盖全部规则；对真实 `moesekai-app-meta` 做一次 dry-run |
 | M4 下载源 | 官网链接、QooApp、期望 versionCode、错误分类 | 实际下载 cn 和 jp 并跑通 `run --dry-run` |
 | M5 服务 | `serve`、HMAC、排队、回调、镜像、部署 JP2 | 用 curl 模拟同步服务发起请求，收到回调，仓库出现对应提交 |

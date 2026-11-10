@@ -98,13 +98,10 @@ public static partial class MetaBuilder
         if (!region.Nuverse && settings.ClientVersion != manifest.VersionName)
             warnings.Add($"Unity 配置的版本 {settings.ClientVersion} 与 versionName {manifest.VersionName} 不同");
 
-        // 4. 密钥
-        var keys = KeyExtractor.Extract(metadata, region.Nuverse);
-
-        // 5. Il2CppDumper（Nuverse 服必需：生成结构文件）
+        // 4. Il2CppDumper（Nuverse 服必需：生成结构文件；CP 服给了也会跑，用于反汇编解析密钥）
         if (region.Nuverse && request.Il2CppDumperDll is null)
             throw new ArgumentException($"{region.Code} 是 Nuverse 服，需要 Il2CppDumper 生成结构文件（--il2cppdumper）");
-        string? dummyDir = null;
+        string? dummyDir = null, soPath = null;
         var work = Path.Combine(Path.GetTempPath(), "pjsk-meta-builder", Guid.NewGuid().ToString("N"));
         try
         {
@@ -113,13 +110,16 @@ public static partial class MetaBuilder
                 Directory.CreateDirectory(work);
                 if (!OperatingSystem.IsWindows())
                     File.SetUnixFileMode(work, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-                var so = Path.Combine(work, "libil2cpp.so");
+                soPath = Path.Combine(work, "libil2cpp.so");
                 var meta = Path.Combine(work, "global-metadata.dat");
-                File.WriteAllBytes(so, files.Read(LibIl2Cpp));
+                File.WriteAllBytes(soPath, files.Read(LibIl2Cpp));
                 File.WriteAllBytes(meta, metadata);
                 dummyDir = new Il2CppDumperRunner(request.Il2CppDumperDll, request.DotnetHost)
-                    .Run(so, meta, Path.Combine(work, "dump"));
+                    .Run(soPath, meta, Path.Combine(work, "dump"));
             }
+
+            // 5. 密钥：有 dump 输出就反汇编 cctor 动态定位（能跟上密钥更换），否则用已知哈希表
+            var keys = ResolveKeys(metadata, region, dummyDir, soPath, warnings);
 
             // 6. 写产物
             Directory.CreateDirectory(request.OutputDir);
@@ -156,6 +156,32 @@ public static partial class MetaBuilder
         {
             if (!request.KeepWorkDir && Directory.Exists(work))
                 Directory.Delete(work, true);
+        }
+    }
+
+    /// <summary>
+    /// 有 Il2CppDumper 输出（so + script.json）就反汇编 APIManager..cctor 动态定位密钥字段（§9 Q1 方案 1），
+    /// 这样密钥更换也能跟上；同时与已知哈希表交叉校验并记录。解析失败或没有 dump 输出时回退到已知哈希表。
+    /// </summary>
+    private static Keys.KeySet ResolveKeys(byte[] metadata, RegionInfo region, string? dummyDir, string? soPath, List<string> warnings)
+    {
+        if (dummyDir is null || soPath is null)
+            return KeyExtractor.Extract(metadata, region);
+
+        var scriptJson = Path.Combine(Path.GetDirectoryName(dummyDir)!, "script.json");
+        try
+        {
+            var resolved = KeyResolver.Resolve(soPath, scriptJson, metadata, region.Nuverse);
+            var known = KeyExtractor.KnownHashes(region);
+            if (!resolved.Hashes.SequenceEqual(known, StringComparer.OrdinalIgnoreCase))
+                warnings.Add($"密钥字段与已知哈希表不同（可能已更换），以 cctor 反汇编结果为准："
+                    + string.Join("、", resolved.Hashes.Select(h => h[..8] + "…")));
+            return resolved.Keys;
+        }
+        catch (DataException e)
+        {
+            warnings.Add($"cctor 反汇编解析密钥失败，回退到已知哈希表：{e.Message}");
+            return KeyExtractor.Extract(metadata, region);
         }
     }
 

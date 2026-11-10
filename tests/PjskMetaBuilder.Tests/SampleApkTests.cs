@@ -51,6 +51,18 @@ public class SampleApkTests
         Assert.Null(r.Keys.Ab);
     }
 
+    /// <summary>jp 带 Il2CppDumper：密钥应由反汇编 cctor 得到（§9 Q1），且与已知哈希一致（不回退、不告警）。</summary>
+    [Fact]
+    public void Jp710ResolvesKeysByDisassembly()
+    {
+        if (Sample("PJSK_SAMPLE_JP_APK") is not { } apk || Dumper is null)
+            return;
+        var r = BuildSample("jp", apk, withDumper: true);
+        Assert.Equal("5B30CBC1", KeyExtractor.Fingerprint(r.Keys.Api.Key));
+        Assert.Equal("7C1CF10C", KeyExtractor.Fingerprint(r.Keys.Api.Iv));
+        Assert.DoesNotContain(r.Warnings, w => w.Contains("回退") || w.Contains("与已知哈希表不同"));
+    }
+
     [Fact]
     public void Cn641()
     {
@@ -65,6 +77,7 @@ public class SampleApkTests
         Assert.Equal("3673BB77", KeyExtractor.Fingerprint(r.Keys.Api.Iv));
         Assert.NotNull(r.Keys.Ab);
         Assert.Equal("5B30CBC1", KeyExtractor.Fingerprint(r.Keys.Ab!.Key));
+        Assert.DoesNotContain(r.Warnings, w => w.Contains("回退") || w.Contains("与已知哈希表不同")); // 密钥由反汇编 cctor 得到
 
         // moe-info.json：数组两项，位串可还原为同一密钥
         var moeInfo = JsonSerializer.Deserialize<List<MoeInfoEntry>>(Artifacts.Serialize(Artifacts.MoeInfo(r.Keys)))!;
