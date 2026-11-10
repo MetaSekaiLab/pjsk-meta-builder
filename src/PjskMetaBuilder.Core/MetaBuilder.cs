@@ -6,6 +6,7 @@ using PjskMetaBuilder.Core.Keys;
 using PjskMetaBuilder.Core.Metadata;
 using PjskMetaBuilder.Core.Output;
 using PjskMetaBuilder.Core.Packages;
+using PjskMetaBuilder.Core.Schema;
 using PjskMetaBuilder.Core.Unity;
 
 namespace PjskMetaBuilder.Core;
@@ -31,7 +32,8 @@ public sealed record BuildResult(
     ManifestInfo Manifest,
     IReadOnlyDictionary<string, string> WrittenFiles,
     IReadOnlyList<string> Warnings,
-    string? DummyDllDir);
+    string? DummyDllDir,
+    SchemaResult? Schema = null);
 
 /// <summary>设计文档 §3 的第 1–7 步（第一版 M1：不含结构文件）。不需要任何凭据。</summary>
 public static partial class MetaBuilder
@@ -99,7 +101,9 @@ public static partial class MetaBuilder
         // 4. 密钥
         var keys = KeyExtractor.Extract(metadata, region.Nuverse);
 
-        // 5. Il2CppDumper（M1 只验证能跑通；M2 起用于结构文件和密钥定位）
+        // 5. Il2CppDumper（Nuverse 服必需：生成结构文件）
+        if (region.Nuverse && request.Il2CppDumperDll is null)
+            throw new ArgumentException($"{region.Code} 是 Nuverse 服，需要 Il2CppDumper 生成结构文件（--il2cppdumper）");
         string? dummyDir = null;
         var work = Path.Combine(Path.GetTempPath(), "pjsk-meta-builder", Guid.NewGuid().ToString("N"));
         try
@@ -122,6 +126,13 @@ public static partial class MetaBuilder
             var written = new Dictionary<string, string>();
             var moeInfo = Artifacts.Serialize(Artifacts.MoeInfo(keys));
             WriteFile(request.OutputDir, "moe-info.json", moeInfo, written);
+            SchemaResult? schema = null;
+            if (region.Nuverse)
+            {
+                schema = SchemaGenerator.Generate(dummyDir!, appVersion);
+                WriteFile(request.OutputDir, "schema.json", SchemaGenerator.Serialize(schema.Schema), written);
+                warnings.AddRange(schema.Warnings.Select(w => "结构文件：" + w));
+            }
 
             var meta2 = new AppMeta(
                 Artifacts.MetaSchema,
@@ -133,13 +144,13 @@ public static partial class MetaBuilder
                 settings.ClientVersion,
                 settings.AbVersion,
                 new PackageMeta(manifest.Package, manifest.VersionName, versionCode, Sha256File(baseApk), request.Source),
-                new SortedDictionary<string, string>(StringComparer.Ordinal) { ["moe-info.json"] = written["moe-info.json"] },
+                new SortedDictionary<string, string>(written, StringComparer.Ordinal),
                 (request.Now ?? DateTimeOffset.UtcNow).ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"),
                 new BuilderMeta(BuilderVersion, Il2CppDumperRunner.PinnedRevision));
             WriteFile(request.OutputDir, "meta.json", Artifacts.Serialize(meta2), written);
 
             return new BuildResult(meta2, keys, settings, manifest, written, warnings,
-                request.KeepWorkDir ? dummyDir : null);
+                request.KeepWorkDir ? dummyDir : null, schema);
         }
         finally
         {

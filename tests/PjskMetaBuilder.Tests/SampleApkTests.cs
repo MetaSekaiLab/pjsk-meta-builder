@@ -9,6 +9,7 @@ namespace PjskMetaBuilder.Tests;
 /// 用真实安装包跑完整的 build。安装包很大、不进仓库：设置环境变量后才会执行，否则直接通过。
 ///   PJSK_SAMPLE_JP_APK = jp 7.1.0 原始包（pjsk-reverse-workflow Release build-41579208757-1）
 ///   PJSK_SAMPLE_CN_APK = cn 6.4.1 官网包（versionCode 4647）
+///   PJSK_IL2CPPDUMPER_DLL / PJSK_DOTNET = Il2CppDumper.dll 与 dotnet（Nuverse 服生成结构文件必需）
 /// 期望值来自 workflow identity.py 的输出（设计文档 §10）。
 /// </summary>
 public class SampleApkTests
@@ -16,12 +17,16 @@ public class SampleApkTests
     private static string? Sample(string env) =>
         Environment.GetEnvironmentVariable(env) is { Length: > 0 } p && File.Exists(p) ? p : null;
 
-    private static BuildResult BuildSample(string region, string apk)
+    private static string? Dumper => Sample("PJSK_IL2CPPDUMPER_DLL");
+
+    private static BuildResult BuildSample(string region, string apk, bool withDumper = false)
     {
         var dir = Path.Combine(Path.GetTempPath(), "pjsk-meta-builder-tests", Guid.NewGuid().ToString("N"));
         try
         {
-            return MetaBuilder.Build(new BuildRequest(region, [apk], dir, Now: DateTimeOffset.UnixEpoch));
+            return MetaBuilder.Build(new BuildRequest(region, [apk], dir, Now: DateTimeOffset.UnixEpoch,
+                Il2CppDumperDll: withDumper ? Dumper : null,
+                DotnetHost: Environment.GetEnvironmentVariable("PJSK_DOTNET")));
         }
         finally
         {
@@ -49,9 +54,9 @@ public class SampleApkTests
     [Fact]
     public void Cn641()
     {
-        if (Sample("PJSK_SAMPLE_CN_APK") is not { } apk)
+        if (Sample("PJSK_SAMPLE_CN_APK") is not { } apk || Dumper is null)
             return;
-        var r = BuildSample("cn", apk);
+        var r = BuildSample("cn", apk, withDumper: true);
         Assert.Equal("6.4.1", r.Meta.AppVersion);
         Assert.Equal("d67a688b-ff78-4300-bfc5-2120c000d75d", r.Meta.AppHash);
         Assert.Equal("2022.3.62f3", r.Meta.UnityVersion);
@@ -66,6 +71,27 @@ public class SampleApkTests
         Assert.Equal(2, moeInfo.Count);
         Assert.Equal(r.Keys.Api.Key, BitString.Decode(moeInfo[0].MoeKey));
         Assert.Equal(r.Keys.Ab.Iv, BitString.Decode(moeInfo[1].MoeSecret));
+
+        // 结构文件：表名取自 SuiteMaster 的 [Key]（与 master 186 核对、与 Haruki 比对见设计文档 §5.6）
+        var schema = r.Schema!.Schema;
+        var tables = schema["tables"]!.AsObject();
+        Assert.Equal(435, tables.Count);
+        Assert.Empty(r.Schema.Warnings);
+        Assert.Equal("Sekai.BillingShopItemRandomBoxGroups", (string?)tables["billingShopItemRandomBoxGroups"]!["class"]);
+        Assert.Equal("bondLive2ds", (string?)tables["bondsLive2ds"]!["field"]);
+        Assert.True((bool?)tables["compactCostume3dShopItemCosts"]!["compact"]);
+        Assert.Equal("object", (string?)tables["compactCostume3dShopItemCosts"]!["container"]);
+        var cardCostume = schema["classes"]!["Sekai.MasterCardCostume3D"]!["fields"]!.AsArray();
+        Assert.Equal(["cardId", "costume3dId"], cardCostume.Select(f => (string)f!["name"]!).ToArray());
+        Assert.Contains("schema.json", r.Meta.Files.Keys);
+    }
+
+    [Fact]
+    public void NuverseWithoutDumperIsRejected()
+    {
+        if (Sample("PJSK_SAMPLE_CN_APK") is not { } apk)
+            return;
+        Assert.Throws<ArgumentException>(() => BuildSample("cn", apk));
     }
 
     [Fact]

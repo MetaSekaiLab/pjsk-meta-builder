@@ -69,6 +69,8 @@ static int Build(Options o)
         + (result.Keys.Ab is { } ab ? $"，[1] {KeyExtractor.Fingerprint(ab.Key)}/{KeyExtractor.Fingerprint(ab.Iv)}" : ""));
     foreach (var (name, sha) in result.WrittenFiles)
         Console.WriteLine($"  {name}  sha256 {sha}");
+    if (result.Schema is { } schema)
+        Console.WriteLine($"  结构文件：{schema.Tables} 张表，{schema.Classes} 个类，{schema.Warnings.Count} 条警告");
     if (result.DummyDllDir is not null)
         Console.WriteLine($"  DummyDll：{result.DummyDllDir}");
     foreach (var w in result.Warnings)

@@ -128,21 +128,21 @@ masterdata 同步服务（另一个独立项目，Go）需要每个服当前版�
 
 ### 4.4 schema.json（Nuverse 服）
 
-自定格式，第一版草案：
+自定格式（M2 已实现）：
 
 ```jsonc
 {
   "schema": 1,
   "source": { "appVersion": "6.4.1", "assembly": "Assembly-CSharp", "suiteMaster": "Sekai.SuiteMaster" },
-  "tables": {                                   // 来自 SuiteMaster 的字段：字段名 = 表名
+  "tables": {                         // 来自 SuiteMaster 成员的 [Key("表名")]，即 master 的顶层键
     "areas": { "class": "Sekai.MasterArea", "container": "array" },
-    "billingShopItemRandomBoxGroups": { "class": "Sekai.BillingShopItemRandomBoxGroups", "container": "array" }
+    "bondsLive2ds": { "class": "Sekai.MasterBondLive2d", "container": "array", "field": "bondLive2ds" },
+    "compactCostume3dShopItemCosts": { "class": "Sekai.CompactMasterCostume3dShopItemCosts", "container": "object", "compact": true }
   },
   "classes": {
     "Sekai.MasterArea": {
       "fields": [
         { "key": 0, "name": "id", "type": "int" },
-        { "key": 1, "name": "groupId", "type": "int" },
         { "key": 2, "name": "label", "type": "string", "nullable": true }
       ]
     }
@@ -150,12 +150,15 @@ masterdata 同步服务（另一个独立项目，Go）需要每个服当前版�
 }
 ```
 
+- `container`：`array`（`T[]`、`List<T>`）、`map`（`Dictionary<K,V>`，元素取 V）、`object`（单个对象，compact 表就是这种）。
+- `field`：只在成员名与表名不同时出现（例：字段 `bondLive2ds` 的 Key 是 `bondsLive2ds`）。
+- `compact`：表名以 `compact` 开头的 object 表。它的类每个成员是一列（数组），`__ENUM__` 成员指向取值表类（成员为 `string[]`）；按列展开成行由同步服务完成。
 - `key`：`[Key(n)]` 为整数，`[Key("x")]` 为字符串。
-- `name`：去掉开头的下划线，转成 camelCase（与 Haruki 一致：`_assetbundleName` → `assetbundleName`）。
-- `type`：`int` `long` `float` `double` `bool` `string` `bytes`、`{"array": T}`、`{"map": [K, V]}`、类名引用、枚举（`{"enum": "Sekai.X", "underlying": "int"}`，以后可加名字表）。
-- `nullable`：`Nullable<T>` 或引用类型。
-- `compact*` 表的描述方式见 §9 未决项 Q2。
-- 生成后按规范化格式写出（键排序、紧凑、无末尾换行），同一个 DummyDll 每次生成的 sha256 相同。
+- `name`：去掉开头的下划线后转 camelCase（与 Haruki 一致：`_assetbundleName` → `assetbundleName`）。
+- `type`：`int` `long` `float` `double` `bool` `string` `bytes`；`{"array": T}`；`{"map": [K, V]}`；`{"pair": [K, V]}`；`{"class": "全名"}`；`{"enum": "全名", "underlying": "int", "values": {名字: 数值}}`；无法描述时 `{"unknown": "全名"}` 并告警。
+- `nullable`：引用类型或 `Nullable<T>`。
+- 字段和带 `[Key]` 的属性都算（SuiteMaster 里有些表是自动属性）；基类成员一并收集；`[IgnoreMember]` 排除。
+- 规范化输出：键排序、紧凑、无末尾换行；同一个 DummyDll 每次生成的 sha256 相同（已验证）。
 
 ### 4.5 更新规则
 
@@ -241,18 +244,27 @@ masterdata 同步服务（另一个独立项目，Go）需要每个服当前版�
 
 ### 5.6 生成结构文件（Nuverse 服）
 
-用 Mono.Cecil 读 DummyDll：
+用 Mono.Cecil 读 DummyDll（`Schema/SchemaGenerator.cs`）：
 
-1. 找到 `Sekai.SuiteMaster`，枚举它的字段：字段名就是表名，元素类型（`T[]`、`List<T>`、`Dictionary<K,T>`）就是行的类。cn 6.4.1 有 415 个。
-2. 从这些类出发递归收集带 `[MessagePackObject]` 的类型，读每个字段的 `[Key]`、名字、类型。
-3. 按 §4.4 写出。
+1. 找到 `Sekai.SuiteMaster`，枚举带 `[Key]` 的字段**和属性**：**Key 字符串就是表名**（不是成员名），元素类型就是行的类。
+2. 从这些类出发递归收集引用到的类型，读每个成员的 `[Key]`、名字、类型。
+3. 按 §4.4 写出。Nuverse 服 build 时必须提供 Il2CppDumper。
 
-已知要覆盖的情况（cn 6.4.1 用 master 186 核对得到）：
+**M2 核对结果（cn 6.4.1，master 186）**：
 
-- `billingShopItemRandomBoxGroups` 的类 `BillingShopItemRandomBoxGroups` 没有 `Master` 前缀：Haruki 生成器因此漏掉了它，按 SuiteMaster 读取就能覆盖到。
-- `cardCostume3ds` 的数据每行 3 列，类 `MasterCardCostume3D` 只有 2 个 Key（第 3 列是 bool，2094 个 False、1 个 True）：结构文件照实描述 2 个字段。多出来的列怎么处理由同步服务决定（告警，不应判为失败）。
-- 8 张 `compact*` 表以及 `bondsLive2ds`、`bondsRankUpLive2ds` 不在 SuiteMaster 的字段里，见 §9 Q2。
-- 对照基准：Haruki 生成器对同一个 DummyDll 的输出（sha256 `f89f6bec…`），与 Haruki 线上的 cn 6.4.0 结构文件逐字节相同。我们的输出格式不同，但字段名和 Key 必须对得上（除了上面那些已知差异）。
+| 项 | 结果 |
+| --- | --- |
+| 结构文件 | 435 张表、531 个类、0 条警告；连续两次生成 sha256 相同 |
+| master 顶层键 | 424 个；数组行表 402 张全部有映射，42 万行行宽和类型核对通过；8 张 compact 表的列都在对应类里 |
+| SuiteMaster 之外的 9 张表 | `unitAssets`、`backgroundMusics` 等，行全是对象（自带字段名）或空表，原样输出即可 |
+| 与 Haruki 生成器比对 | master 中实际存在的 389 张表，Key → 字段名全部一致；我们多覆盖 29 张（含 8 张 compact、`billingShopItemRandomBoxGroups`、`bondsLive2ds` 等） |
+| hmt 6.4.0 | 表和类与 cn 6.4.1 完全相同 |
+
+需要同步服务处理的情况：
+
+- `cardCostume3ds` 数据每行 3 列，类 `MasterCardCostume3D` 只有 2 个 Key：结构文件照实描述，多出的列由同步服务告警（不应判失败）。
+- 对象行里会有类中没有的键（服务器多发、客户端不读，例：`ingameJudgeFrames` 的 `perfect`），原样保留。
+- master 里出现结构文件没有的表时：对象行原样输出；数组行无法还原，告警。
 
 ### 5.7 内容检查
 
@@ -354,7 +366,7 @@ X-Moe-Signature: sha256=<hex(HMAC_SHA256(secret, timestamp + "." + body))>
 | # | 问题 | 当前打算 |
 | --- | --- | --- |
 | Q1 | 密钥字段的定位方法（§5.5） | 先用已知哈希跑通，同时实现「反汇编 `APIManager..cctor`」，两者结果对得上再去掉哈希表 |
-| Q2 | `compact*` 表和 SuiteMaster 之外的顶层键怎么描述 | 先在客户端里找反序列化这些表的类（应该不在 SuiteMaster 里）；sssekai 的展开规则是经验性的（按列 → 按行，`__ENUM__` 查表），可作参考 |
+| Q2 | ~~`compact*` 表和 SuiteMaster 之外的顶层键怎么描述~~ | **已解决（M2）**：compact 表就是 SuiteMaster 的成员（按列存放的类），见 §4.4；SuiteMaster 之外的表行都是对象，原样输出 |
 | Q3 | Nuverse 服 API 请求实际用 [0] 还是 [1] | 等同步服务拿到 cn 账号 accessToken、实测 `user/auth` 时确认；不影响 builder |
 | Q4 | QooApp 上 jp 的分包里，`assets/bin/Data` 是否完整在主包 | 用真实下载验证；不完整就按虚拟文件系统在所有分包里查找 |
 | Q5 | AssetsTools.NET 读取没有 typetree 的 MonoBehaviour | 按 §5.3 的固定字段顺序手工读；用 jp 7.1.0、cn 6.4.1 的结果与 workflow（Python）对照 |
