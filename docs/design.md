@@ -281,6 +281,10 @@ masterdata 同步服务（另一个独立项目，Go）需要每个服当前版�
 2. 浅克隆 `main` → 按 §4.5 判定 → 写文件 → 一次提交 → push。push 被拒（别人先推了）时重新克隆、重新判定，最多 5 次。
 3. 提交者：App 的 bot 身份；提交信息：`<region>: <旧版本> → <新版本> (versionCode <n>)`。
 4. 返回结果、commit sha 和每个文件的 sha256，回调时带上。
+5. 提交身份固定为 `pjsk-meta-builder <pjsk-meta-builder@users.noreply.github.com>`（可配置），git 子进程会清掉外部的 `GIT_AUTHOR_*` / `GIT_COMMITTER_*`，避免被运行环境的身份覆盖。
+6. 产物仓库为空（第一次发布）时直接 `git init` 并推到 `main`。
+
+**M3 状态**：`publish` / `run` 已实现；用本地裸仓库覆盖了首发、重复（noop）、旧版本补目录、同版本新构建（`+versionCode` 目录）、拒绝、已存在目录属于其他构建时报错、dry-run 不写入；JWT 签名有单元测试。push 被拒后重试的路径还没有自动化测试。2026-11-10 已建公开空仓库 `StarMoe-org/moesekai-app-meta`，用 jp 7.1.0、cn 6.4.1、hmt 6.4.0 的 build 产物做 dry-run，均判 `advanced`（空仓库首发路径），仓库保持为空。GitHub App 已建，真实写入待验证。
 
 ## 6. 命令行
 

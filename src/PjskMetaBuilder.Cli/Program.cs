@@ -2,6 +2,7 @@
 using PjskMetaBuilder.Core.Keys;
 using PjskMetaBuilder.Core.Metadata;
 using PjskMetaBuilder.Core.Packages;
+using PjskMetaBuilder.Core.Publish;
 using PjskMetaBuilder.Core.Unity;
 
 // 退出码：0 成功；75 网络类或来源未就绪（可重试）；65 数据类失败；64 用法错误；70 内部错误。
@@ -13,6 +14,8 @@ try
     {
         "build" => Build(Options.Parse(args[1..])),
         "inspect" => Inspect(Options.Parse(args[1..])),
+        "publish" => Publish(Options.Parse(args[1..])),
+        "run" => RunAll(Options.Parse(args[1..])),
         _ => Usage(),
     };
 }
@@ -50,11 +53,55 @@ static int Usage()
                                     [--source local] [--expected-version-code N]
                                     [--il2cppdumper <Il2CppDumper.dll>] [--dotnet <dotnet 路径>] [--keep-work]
           pjsk-meta-builder inspect --apk <主包> [--apk <拆分包> …]
+          pjsk-meta-builder publish --region <地区> --dir <build 输出目录> [--repo owner/name|路径] [--branch main] [--dry-run]
+          pjsk-meta-builder run     （build 的全部参数）+ [--repo …] [--branch …] [--dry-run]：build 后直接 publish
+
+        publish 的写入凭据（--dry-run 不需要）：
+          GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY（PEM 内容）或 GITHUB_APP_PRIVATE_KEY_FILE
         """);
     return ExUsage;
 }
 
 static int Build(Options o)
+{
+    BuildCore(o);
+    return 0;
+}
+
+static int RunAll(Options o)
+{
+    BuildCore(o);
+    return PublishDir(o, o.Required("out"));
+}
+
+static int Publish(Options o) => PublishDir(o, o.Required("dir"));
+
+static int PublishDir(Options o, string dir)
+{
+    var repo = o.Get("repo") ?? Environment.GetEnvironmentVariable("APP_META_REPO") ?? "StarMoe-org/moesekai-app-meta";
+    var dryRun = o.Has("dry-run");
+    string? token = null;
+    if (!dryRun && Git.IsGitHub(repo))
+    {
+        var appId = Environment.GetEnvironmentVariable("GITHUB_APP_ID")
+            ?? throw new ArgumentException("缺少 GITHUB_APP_ID");
+        var pem = Environment.GetEnvironmentVariable("GITHUB_APP_PRIVATE_KEY")
+            ?? (Environment.GetEnvironmentVariable("GITHUB_APP_PRIVATE_KEY_FILE") is { } f ? File.ReadAllText(f) : null)
+            ?? throw new ArgumentException("缺少 GITHUB_APP_PRIVATE_KEY / GITHUB_APP_PRIVATE_KEY_FILE");
+        var parts = repo.Split('/');
+        token = new GitHubAppToken(appId, pem).CreateInstallationTokenAsync(parts[0], parts[1]).GetAwaiter().GetResult();
+    }
+    var result = Publisher.Publish(new PublishRequest(o.Required("region"), dir, repo, o.Get("branch") ?? "main", token, dryRun));
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(result, new System.Text.Json.JsonSerializerOptions
+    {
+        WriteIndented = true,
+        PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    }));
+    return result.Result == "rejected" ? ExData : 0;
+}
+
+static void BuildCore(Options o)
 {
     var result = MetaBuilder.Build(new BuildRequest(
         o.Required("region"), o.Apks(), o.Required("out"),
@@ -75,7 +122,6 @@ static int Build(Options o)
         Console.WriteLine($"  DummyDll：{result.DummyDllDir}");
     foreach (var w in result.Warnings)
         Console.Error.WriteLine($"警告：{w}");
-    return 0;
 }
 
 static int Inspect(Options o)
