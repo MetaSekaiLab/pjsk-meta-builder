@@ -9,9 +9,14 @@ public sealed record PublishRequest(
     string Branch = "main",
     string? Token = null,
     bool DryRun = false,
-    string CommitterName = "pjsk-meta-builder",
-    string CommitterEmail = "pjsk-meta-builder@users.noreply.github.com",
-    int MaxAttempts = 5);
+    string CommitterName = PublishRequest.BotName,
+    string CommitterEmail = PublishRequest.BotEmail,
+    int MaxAttempts = 5)
+{
+    /// <summary>GitHub App moesekai-bot 的 bot 账号（App ID 5693240，bot 用户 id 354789470），提交会关联到该 App。</summary>
+    public const string BotName = "moesekai-bot[bot]";
+    public const string BotEmail = "354789470+moesekai-bot[bot]@users.noreply.github.com";
+}
 
 public sealed record PublishResult(
     string Result,              // advanced / snapshot_only / noop / rejected（dry-run 时同样给出判定）

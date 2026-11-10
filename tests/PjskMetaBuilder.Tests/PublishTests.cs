@@ -158,6 +158,9 @@ public class PublisherTests
         Assert.Equal(["jp/7.0.0/meta.json", "jp/7.0.0/moe-info.json", "jp/7.1.0+101/meta.json", "jp/7.1.0+101/moe-info.json",
             "jp/7.1.0/meta.json", "jp/7.1.0/moe-info.json", "jp/latest.json"], Tree(repo).Order(StringComparer.Ordinal).ToArray());
 
+        Assert.Equal($"{PublishRequest.BotName} <{PublishRequest.BotEmail}>|{PublishRequest.BotName} <{PublishRequest.BotEmail}>",
+            new Git().Check(null, "--git-dir", repo, "log", "-1", "--format=%an <%ae>|%cn <%ce>", "main").Trim());
+
         var latest = JsonDocument.Parse(new Git().Check(null, "--git-dir", repo, "show", "main:jp/latest.json")).RootElement;
         Assert.Equal(101, latest.GetProperty("package").GetProperty("versionCode").GetInt64());
     }
