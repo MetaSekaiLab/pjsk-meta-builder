@@ -14,32 +14,18 @@ public sealed class OfficialUrlSource(HttpClient? http = null, Action<string>? l
 
     public string Name => "official";
 
-    public DownloadedPackage Fetch(RegionInfo region, string cacheDir, long? expectedVersionCode)
+    /// <summary>探测官网链接：跟随跳转拿到最终地址和文件大小，只取 1 个字节。</summary>
+    public (Uri Final, long Total) Probe(RegionInfo region)
     {
         if (region.OfficialUrl is not { } url)
             throw new ArgumentException($"{region.Code} 没有官网下载链接");
+        var (final, total) = _downloader.ProbeRange(new Uri(url));
+        return (final, total ?? throw new HttpRequestException("官网链接没有返回文件大小"));
+    }
 
-        Uri final;
-        long total;
-        using (var probe = _downloader.Send(u =>
-        {
-            var req = new HttpRequestMessage(HttpMethod.Get, u);
-            req.Headers.UserAgent.ParseAdd("pjsk-meta-builder/0.1");
-            req.Headers.Range = new RangeHeaderValue(0, 0);
-            return req;
-        }, new Uri(url)))
-        {
-            if (!probe.IsSuccessStatusCode)
-            {
-                var code = (int)probe.StatusCode;
-                if (code == 404)
-                    throw new SourceNotReadyException($"官网链接返回 404（{probe.RequestMessage?.RequestUri?.Host}）");
-                throw new HttpRequestException($"官网链接返回 HTTP {code}");
-            }
-            final = probe.RequestMessage!.RequestUri!;
-            total = probe.StatusCode == HttpStatusCode.PartialContent && probe.Content.Headers.ContentRange?.Length is { } len ? len
-                : probe.Content.Headers.ContentLength ?? throw new HttpRequestException("官网链接没有返回文件大小");
-        }
+    public DownloadedPackage Fetch(RegionInfo region, string cacheDir, long? expectedVersionCode)
+    {
+        var (final, total) = Probe(region);
 
         var fileName = Path.GetFileNameWithoutExtension(final.AbsolutePath);
         if (string.IsNullOrEmpty(fileName) || fileName.Any(c => !(char.IsAsciiLetterOrDigit(c) || c is '_' or '-' or '.')))

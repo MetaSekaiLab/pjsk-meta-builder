@@ -20,7 +20,7 @@ public sealed class GitHubAppToken(string appId, string privateKeyPem, HttpClien
         var header = B64Url(JsonSerializer.SerializeToUtf8Bytes(new { alg = "RS256", typ = "JWT" }));
         var payload = B64Url(JsonSerializer.SerializeToUtf8Bytes(new { iat = t - 60, exp = t + 540, iss = appId }));
         using var rsa = RSA.Create();
-        rsa.ImportFromPem(privateKeyPem);
+        rsa.ImportFromPem(NormalizePem(privateKeyPem));
         var signature = rsa.SignData(Encoding.ASCII.GetBytes($"{header}.{payload}"), HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
         return $"{header}.{payload}.{B64Url(signature)}";
     }
@@ -38,6 +38,26 @@ public sealed class GitHubAppToken(string appId, string privateKeyPem, HttpClien
         using var created = await _http.SendAsync(create, ct);
         await GitHubHttp.EnsureOk(created, "申请 installation token", ct);
         return (await created.Content.ReadFromJsonAsync<JsonElement>(ct)).GetProperty("token").GetString()!;
+    }
+
+    /// <summary>
+    /// 部署面板的环境变量常常不支持多行：接受原样 PEM、把换行写成字面 <c>\n</c> 的 PEM，或整个 PEM 的 base64。
+    /// </summary>
+    public static string NormalizePem(string value)
+    {
+        var v = value.Trim();
+        if (v.Contains("-----BEGIN", StringComparison.Ordinal))
+            return v.Replace("\\n", "\n", StringComparison.Ordinal);
+        try
+        {
+            var decoded = Encoding.UTF8.GetString(Convert.FromBase64String(v));
+            if (decoded.Contains("-----BEGIN", StringComparison.Ordinal))
+                return decoded;
+        }
+        catch (FormatException)
+        {
+        }
+        throw new ArgumentException("GitHub App 私钥既不是 PEM，也不是 PEM 的 base64");
     }
 
     private static string B64Url(byte[] data) => Convert.ToBase64String(data).TrimEnd('=').Replace('+', '-').Replace('/', '_');

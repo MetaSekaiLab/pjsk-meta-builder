@@ -43,9 +43,13 @@ public static class ServiceHost
             builder.Services.AddSingleton<IJobRunner, PipelineRunner>();
         builder.Services.AddSingleton<JobQueue>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<JobQueue>());
+        builder.Services.AddSingleton<SelfTestState>();
+        if (Environment.GetEnvironmentVariable("PJSK_SELFTEST") == "1")
+            builder.Services.AddHostedService<StartupSelfTest>();
 
         var app = builder.Build();
         var queue = app.Services.GetRequiredService<JobQueue>();
+        var selfTest = app.Services.GetRequiredService<SelfTestState>();
 
         app.MapGet("/healthz", () => Results.Json(new
         {
@@ -53,6 +57,9 @@ public static class ServiceHost
             version = MetaBuilder.BuilderVersion,
             pending = queue.Pending,
             running = queue.Running is not null,
+            selfTest = selfTest.Results is { } r
+                ? new { passed = r.Count(x => x.Ok), total = r.Count, failed = r.Where(x => !x.Ok).Select(x => x.Name), at = selfTest.At }
+                : null,
         }));
 
         app.MapPost("/v1/builds", async (HttpContext ctx) =>

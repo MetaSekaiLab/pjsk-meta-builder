@@ -56,6 +56,25 @@ public sealed class Downloader(HttpClient http, Action<string>? log = null)
         }
     }
 
+    /// <summary>
+    /// 只取第 1 个字节（Range: bytes=0-0），跟随跳转，返回最终地址和总大小；用于探测与自检，不下载文件。
+    /// 失败按 <see cref="EnsureDownloadOk"/> 分类抛出。
+    /// </summary>
+    public (Uri Final, long? Total) ProbeRange(Uri uri, string? userAgent = null)
+    {
+        using var resp = Send(u =>
+        {
+            var req = new HttpRequestMessage(HttpMethod.Get, u);
+            req.Headers.UserAgent.ParseAdd(userAgent ?? "pjsk-meta-builder/0.1");
+            req.Headers.Range = new RangeHeaderValue(0, 0);
+            return req;
+        }, uri);
+        EnsureDownloadOk(resp, uri);
+        var total = resp.StatusCode == HttpStatusCode.PartialContent ? resp.Content.Headers.ContentRange?.Length
+            : resp.Content.Headers.ContentLength;
+        return (resp.RequestMessage?.RequestUri ?? uri, total);
+    }
+
     public static bool IsRedirect(HttpStatusCode code) => (int)code is 301 or 302 or 303 or 307 or 308;
 
     /// <summary>

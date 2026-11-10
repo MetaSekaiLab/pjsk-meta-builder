@@ -202,6 +202,16 @@ public class OfficialUrlSourceTests
     }
 
     [Fact]
+    public void ProbeOnlyFetchesOneByte()
+    {
+        var (source, http) = Create();
+        var (final, total) = source.Probe(Regions.Get("cn"));
+        Assert.Equal(("cdn.test", (long)Apk.Length), (final.Host, total));
+        var cdn = Assert.Single(http.Requests, r => r.RequestUri!.Host == "cdn.test");
+        Assert.Equal((0L, 0L), (cdn.Headers.Range!.Ranges.Single().From!.Value, cdn.Headers.Range.Ranges.Single().To!.Value));
+    }
+
+    [Fact]
     public void RefusesDowngradeToHttp()
     {
         var http = new FakeHttp(req => req.RequestUri!.Host == "pjskyy.ugurl.cn"

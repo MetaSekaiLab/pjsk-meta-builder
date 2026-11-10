@@ -351,3 +351,23 @@ public class GitHubApiRepositoryTests
         Assert.Empty(h.Requests);
     }
 }
+
+public class PemNormalizationTests
+{
+    private static readonly string Pem = System.Security.Cryptography.RSA.Create(2048).ExportRSAPrivateKeyPem();
+
+    [Fact]
+    public void AcceptsRawEscapedAndBase64Pem()
+    {
+        Assert.Equal(Pem.Trim(), GitHubAppToken.NormalizePem(Pem));
+        Assert.Equal(Pem.Trim(), GitHubAppToken.NormalizePem(Pem.Trim().Replace("\n", "\\n")));   // 面板里把换行写成 \n
+        Assert.Equal(Pem, GitHubAppToken.NormalizePem(Convert.ToBase64String(Encoding.UTF8.GetBytes(Pem))));
+        // 三种写法都能签出可验证的 JWT
+        foreach (var form in new[] { Pem, Pem.Trim().Replace("\n", "\\n"), Convert.ToBase64String(Encoding.UTF8.GetBytes(Pem)) })
+            Assert.Equal(3, new GitHubAppToken("1", form).CreateJwt().Split('.').Length);
+    }
+
+    [Fact]
+    public void RejectsGarbage() =>
+        Assert.Throws<ArgumentException>(() => GitHubAppToken.NormalizePem("not a key"));
+}

@@ -21,19 +21,21 @@ public sealed record ServiceOptions
     /// <summary>内存里保留的已结束任务数（GET /v1/builds/{id} 排查用）。</summary>
     public int KeepFinishedJobs { get; init; } = 200;
 
-    public static ServiceOptions FromEnvironment(string? listenOverride = null)
+    /// <summary><paramref name="requireHmac"/> 为 false 时（自检命令）允许没有 HMAC 密钥。</summary>
+    public static ServiceOptions FromEnvironment(string? listenOverride = null, bool requireHmac = true)
     {
         static string? Env(string name) => Environment.GetEnvironmentVariable(name) is { Length: > 0 } v ? v : null;
         static string? Secret(string name) =>
             Env(name) ?? (Env(name + "_FILE") is { } f ? File.ReadAllText(f).Trim() : null);
 
-        var hmac = Secret("MOE_HMAC_SECRET")
-            ?? throw new ArgumentException("缺少 MOE_HMAC_SECRET（或 MOE_HMAC_SECRET_FILE）");
-        if (hmac.Length < 32)
+        var hmac = Secret("MOE_HMAC_SECRET");
+        if (hmac is null && requireHmac)
+            throw new ArgumentException("缺少 MOE_HMAC_SECRET（或 MOE_HMAC_SECRET_FILE）");
+        if (hmac is not null && hmac.Length < 32)
             throw new ArgumentException("MOE_HMAC_SECRET 至少 32 个字符");
         return new ServiceOptions
         {
-            HmacSecret = Encoding.UTF8.GetBytes(hmac),
+            HmacSecret = Encoding.UTF8.GetBytes(hmac ?? ""),
             ListenUrl = listenOverride ?? (Env("PORT") is { } port ? $"http://0.0.0.0:{port}" : "http://0.0.0.0:8080"),
             AppMetaRepo = Env("APP_META_REPO") ?? "StarMoe-org/moesekai-app-meta",
             GitHubAppId = Env("GITHUB_APP_ID"),

@@ -27,6 +27,8 @@ public sealed record QooAppCredentials(string Token, string? UserId = null, stri
     }
 }
 
+public sealed record QooAppProbe(string VersionName, long VersionCode, string BaseHost, long? BaseSize, string? SplitHost);
+
 /// <summary>
 /// QooApp（设计文档 §5.1）：
 /// 1. GET /store/v11/apps/{条目id} → packageId、apk.versionCode/versionName/baseApkMd5、splitApks[]{url, md5, size}
@@ -77,6 +79,26 @@ public sealed class QooAppSource(QooAppCredentials credentials, HttpClient? http
         }
         PackageSources.PruneSiblings(dir);
         return new DownloadedPackage(Name, apks, versionName, versionCode);
+    }
+
+    /// <summary>
+    /// 自检用：查条目、取主包跳转地址，并对主包和第一个拆分包各取 1 个字节，确认 API 和文件域名都能访问。不下载安装包。
+    /// </summary>
+    public QooAppProbe Probe(RegionInfo region)
+    {
+        if (region.QooAppId is not { } appId)
+            throw new ArgumentException($"{region.Code} 没有 QooApp 条目");
+        var detail = Detail(appId);
+        var package = detail.GetProperty("packageId").GetString()!;
+        if (package != region.Package)
+            throw new DataException($"QooApp 条目 {appId} 的包名是 {package}，但 {region.Code} 应该是 {region.Package}");
+        var apk = detail.GetProperty("apk");
+        var (baseFinal, baseSize) = _downloader.ProbeRange(BaseApkUrl(package), UserAgent);
+        string? splitHost = null;
+        if (detail.TryGetProperty("splitApks", out var splits) && splits.ValueKind == JsonValueKind.Array && splits.GetArrayLength() > 0)
+            splitHost = _downloader.ProbeRange(new Uri(splits[0].GetProperty("url").GetString()!), UserAgent).Final.Host;
+        return new QooAppProbe(apk.GetProperty("versionName").GetString() ?? "", apk.GetProperty("versionCode").GetInt64(),
+            baseFinal.Host, baseSize, splitHost);
     }
 
     private static string UserAgent => $"QooApp {ClientVersion}";

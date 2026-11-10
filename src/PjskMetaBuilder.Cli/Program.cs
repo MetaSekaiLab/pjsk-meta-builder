@@ -20,6 +20,7 @@ try
         "publish" => Publish(Options.Parse(args[1..])),
         "run" => RunAll(Options.Parse(args[1..])),
         "serve" => Serve(Options.Parse(args[1..])),
+        "selftest" => RunSelfTest(Options.Parse(args[1..])),
         _ => Usage(),
     };
 }
@@ -68,6 +69,8 @@ static int Usage()
           pjsk-meta-builder run     （build 的全部参数）+ [--repo …] [--branch …] [--dry-run]：build 后直接 publish
           pjsk-meta-builder serve   [--listen http://0.0.0.0:8080] [--il2cppdumper …] [--dotnet …]：HTTP 服务（§7）
                                     需要 MOE_HMAC_SECRET、GitHub App、QooApp token，见设计文档 §8
+                                    （PJSK_SELFTEST=1 时启动后自动跑一次出网自检，结果写日志）
+          pjsk-meta-builder selftest [--il2cppdumper …]：出网与配置自检（不下载安装包、不写仓库）
 
         不给 --apk 时按地区默认来源下载（cn 官网，其余 QooApp），缓存在 PJSK_CACHE_DIR 或 ~/.cache/pjsk-meta-builder。
         QooApp 凭据：QOOAPP_TOKEN 或 QOOAPP_TOKEN_FILE（本机也读 ~/.config/qooapp.env）。
@@ -88,6 +91,17 @@ static int Serve(Options o)
     };
     ServiceHost.Build(options).Run();
     return 0;
+}
+
+static int RunSelfTest(Options o)
+{
+    var options = ServiceOptions.FromEnvironment(requireHmac: false);
+    options = options with { Il2CppDumperDll = o.Get("il2cppdumper") ?? options.Il2CppDumperDll };
+    var results = SelfTest.Run(options);
+    foreach (var r in results)
+        Console.WriteLine($"{(r.Ok ? "OK  " : "FAIL")} {r.Name}（{r.Millis} ms）：{r.Detail}");
+    Console.WriteLine($"{results.Count(r => r.Ok)}/{results.Count} 通过");
+    return results.All(r => r.Ok) ? 0 : 1;
 }
 
 static int Build(Options o)
