@@ -1,0 +1,11 @@
+**/bin/
+**/obj/
+.git/
+.github/
+docs/
+tests/
+deploy/
+out/
+*.apk
+*.pem
+.secrets/

@@ -1,0 +1,66 @@
+# pjsk-meta-builder 部署参考（设计文档 §8）。只在集群内网提供，不建 Ingress。
+# Secret 需事先创建（不要提交真实值）：
+#   kubectl -n apps create secret generic pjsk-meta-builder \
+#     --from-literal=MOE_HMAC_SECRET=... \
+#     --from-literal=GITHUB_APP_ID=... \
+#     --from-file=GITHUB_APP_PRIVATE_KEY=app.pem \
+#     --from-literal=QOOAPP_TOKEN=...
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pjsk-meta-builder
+  namespace: apps
+spec:
+  replicas: 1                      # 任务状态在内存里、同一时间只跑一个任务：只能单副本
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: { app: pjsk-meta-builder }
+  template:
+    metadata:
+      labels: { app: pjsk-meta-builder }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: pjsk-meta-builder
+          image: ghcr.io/metasekailab/pjsk-meta-builder:sha-XXXXXXX   # 用固定的 sha 标签，不用 latest
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - secretRef: { name: pjsk-meta-builder }
+          env:
+            - name: APP_META_REPO
+              value: StarMoe-org/moesekai-app-meta
+          resources:
+            requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 1Gi }
+            limits:   { cpu: "2",  memory: 3Gi, ephemeral-storage: 3Gi }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            periodSeconds: 30
+            failureThreshold: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 3Gi }   # 安装包（cn 约 560MB）+ 解密后的文件 + DummyDll，任务结束即删
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pjsk-meta-builder
+  namespace: apps
+spec:
+  type: ClusterIP
+  selector: { app: pjsk-meta-builder }
+  ports:
+    - port: 8080
+      targetPort: 8080

@@ -4,6 +4,7 @@ using PjskMetaBuilder.Core.Metadata;
 using PjskMetaBuilder.Core.Packages;
 using PjskMetaBuilder.Core.Publish;
 using PjskMetaBuilder.Core.Sources;
+using PjskMetaBuilder.Service;
 using PjskMetaBuilder.Core.Unity;
 
 // 退出码：0 成功；75 网络类或来源未就绪（可重试）；65 数据类失败；64 用法错误；70 内部错误；78 凭据/配置问题（要人处理）。
@@ -18,6 +19,7 @@ try
         "fetch" => Fetch(Options.Parse(args[1..])),
         "publish" => Publish(Options.Parse(args[1..])),
         "run" => RunAll(Options.Parse(args[1..])),
+        "serve" => Serve(Options.Parse(args[1..])),
         _ => Usage(),
     };
 }
@@ -64,6 +66,8 @@ static int Usage()
           pjsk-meta-builder inspect --apk <主包> [--apk <拆分包> …]
           pjsk-meta-builder publish --region <地区> --dir <build 输出目录> [--repo owner/name|路径] [--branch main] [--dry-run]
           pjsk-meta-builder run     （build 的全部参数）+ [--repo …] [--branch …] [--dry-run]：build 后直接 publish
+          pjsk-meta-builder serve   [--listen http://0.0.0.0:8080] [--il2cppdumper …] [--dotnet …]：HTTP 服务（§7）
+                                    需要 MOE_HMAC_SECRET、GitHub App、QooApp token，见设计文档 §8
 
         不给 --apk 时按地区默认来源下载（cn 官网，其余 QooApp），缓存在 PJSK_CACHE_DIR 或 ~/.cache/pjsk-meta-builder。
         QooApp 凭据：QOOAPP_TOKEN 或 QOOAPP_TOKEN_FILE（本机也读 ~/.config/qooapp.env）。
@@ -72,6 +76,18 @@ static int Usage()
           GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY（PEM 内容）或 GITHUB_APP_PRIVATE_KEY_FILE
         """);
     return ExUsage;
+}
+
+static int Serve(Options o)
+{
+    var options = ServiceOptions.FromEnvironment(o.Get("listen"));
+    options = options with
+    {
+        Il2CppDumperDll = o.Get("il2cppdumper") ?? options.Il2CppDumperDll,
+        DotnetHost = o.Get("dotnet") ?? options.DotnetHost,
+    };
+    ServiceHost.Build(options).Run();
+    return 0;
 }
 
 static int Build(Options o)

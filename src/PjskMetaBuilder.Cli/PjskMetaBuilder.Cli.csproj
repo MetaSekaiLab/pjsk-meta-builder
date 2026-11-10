@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\PjskMetaBuilder.Core\PjskMetaBuilder.Core.csproj" />
+    <ProjectReference Include="..\PjskMetaBuilder.Service\PjskMetaBuilder.Service.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

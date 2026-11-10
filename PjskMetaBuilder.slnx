@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/PjskMetaBuilder.Cli/PjskMetaBuilder.Cli.csproj" />
     <Project Path="src/PjskMetaBuilder.Core/PjskMetaBuilder.Core.csproj" />
+    <Project Path="src/PjskMetaBuilder.Service/PjskMetaBuilder.Service.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/PjskMetaBuilder.Tests/PjskMetaBuilder.Tests.csproj" />

@@ -266,7 +266,7 @@ hmt、kr、cn 三个 Nuverse 服的密钥完全相同（`moe-info.json` 字节�
 
 **交叉校验**：方案 1 跑通时，把它得到的有序哈希与方案 3 的已知哈希表比对；不同则告警并以反汇编结果为准（说明密钥已更换）。实测 jp、cn、en 三服方案 1 的结果与已知哈希完全一致（en 的密钥与 jp 不同，由反汇编动态定位，证明不是在重认硬编码值）。
 
-> 本机 `~/pjsk-analysis/scripts/.venv` 里的 `resolve_keys.py`（capstone 原型）用于交叉验证 C# 解码器；生产代码不依赖它。
+> 开发时用 capstone 写的 Python 原型交叉验证过 C# 解码器（不在本仓库）；生产代码不依赖它。
 
 ### 5.6 生成结构文件（Nuverse 服）
 
@@ -361,10 +361,16 @@ POST /v1/builds          同步服务发起处理
   { "requestId": "…", "region": "cn", "source": "official|qooapp", "expectedVersionCode": 4647,
     "callback": "http://<同步服务>.apps.svc.cluster.local/v1/app-meta/callback" }
   → 202 { "requestId": "…", "status": "queued" }
-     409：同一地区已有任务在跑（同一地区串行）
-GET  /v1/builds/{requestId}   查状态（排查用）
-GET  /healthz
+     202：同一 requestId 重复提交（幂等，返回已有任务的状态）
+     409 { "requestId": "<已有任务>", "status": "queued|running" }：同一地区已有任务排队或在跑，等那个任务的回调即可
+     400：请求体不合法（requestId 只能是 1–64 位字母、数字或 ._:-；source 与地区要匹配；callback 是 http(s) 绝对地址）
+     401：签名无效（不告诉调用方具体原因，原因只写日志）
+GET  /v1/builds/{requestId}   查状态（排查用；同样要签名，body 为空）
+GET  /healthz                 存活检查（不需要签名，只返回版本、排队数、是否在跑）
 ```
+
+- `source` 可省略：cn 默认官网链接，其余默认 QooApp。
+- 请求体上限 16KB。
 
 ### 7.2 回调
 
@@ -377,8 +383,19 @@ POST <callback>
     "appVersion": "6.4.1", "versionCode": 4647,
     "commit": "<sha>", "path": "cn/6.4.1",
     "files": { "meta.json": "<sha256>", "moe-info.json": "…", "schema.json": "…" },
-    "error": { "kind": "network|data|internal", "message": "…" } }
+    "error": { "kind": "network|not_ready|data|config|internal", "message": "…" } }
 ```
+
+| error.kind | 含义 | 同步服务的处理 |
+| --- | --- | --- |
+| `network` | 超时、5xx、429、下载中断、MD5 不一致 | 稍后重试 |
+| `not_ready` | 下载源上的版本比期望的旧、文件还没上传完 | 过一段时间再发起 |
+| `data` | 包名不对、格式不认识、已发布目录冲突 | 告警，重试没用 |
+| `config` | QooApp token 失效、服务缺少配置 | 告警，要人处理 |
+| `internal` | 程序错误 | 告警 |
+
+- 发布判定为 `rejected` 也算跑完（`status: succeeded`，`result: rejected`）。
+- `noop` / `rejected` 时 `commit`、`path` 为空，仓库里以 `latest.json` 为准。
 
 - 回调失败按 10 秒、30 秒、2 分钟重试 3 次，之后放弃：同步服务会低频检查仓库来兜底。
 - 仓库是权威来源，回调只是通知。
@@ -396,25 +413,42 @@ X-Moe-Signature: sha256=<hex(HMAC_SHA256(secret, timestamp + "." + body))>
 
 ### 7.4 任务执行
 
-- 同一时间只跑一个任务（内存考虑），其余排队；同一地区的重复请求合并。
-- 每个任务一个临时工作目录，权限 700，结束后删除（安装包、解密后的 metadata、DummyDll 都不保留）。
-- 任务状态只在内存里，重启后丢失；同步服务收不到回调时会重新发起或检查仓库。
+- 同一时间只跑一个任务（内存考虑），其余排队；同一地区已有任务时返回 409（见 §7.1），同一 requestId 幂等。
+- 每个任务一个临时工作目录（`PJSK_WORK_ROOT` 下），权限 700，结束后删除：安装包也在里面，不跨任务缓存（只有版本变化才会触发任务，重新下载可以接受，避免临时存储被几个服的安装包占满）。
+- 服务里总是跑 Il2CppDumper：Nuverse 要生成结构文件，CP 用它反汇编 cctor 定位密钥（§5.5）。
+- 回调在后台重试，不占用下一个任务。
+- 任务状态只在内存里（保留最近 200 个已结束任务），重启后丢失；同步服务收不到回调时会重新发起或检查仓库。
 
 ## 8. 配置与部署
 
 | 配置 | 来源 | 说明 |
 | --- | --- | --- |
 | `GITHUB_APP_ID`、`GITHUB_APP_PRIVATE_KEY` | Secret | StarMoe-org 的 App，与同步服务共用 |
-| `MOE_HMAC_SECRET` | Secret | 与同步服务共用 |
+| `MOE_HMAC_SECRET`（或 `_FILE`） | Secret | 与同步服务共用，至少 32 个字符，不够时拒绝启动 |
 | `QOOAPP_TOKEN`（或 `QOOAPP_TOKEN_FILE`） | Secret | jp、en、hmt、kr 下载；可选 `QOOAPP_USER_ID`、`QOOAPP_DEVICE_ID` |
-| `PJSK_CACHE_DIR` | 配置 | 下载缓存目录；服务里放在临时存储上 |
+| `PJSK_CACHE_DIR` | 配置 | 命令行的下载缓存目录（服务不用，见 §7.4） |
+| `PJSK_WORK_ROOT`、`PORT` | 配置 | 服务的任务临时目录（镜像默认 `/tmp/pjsk-meta-jobs`）和端口（默认 8080） |
+| `IL2CPPDUMPER_DLL`、`PJSK_DOTNET` | 配置 | 镜像里已设好 `/opt/il2cppdumper/Il2CppDumper.dll` |
 | `APP_META_REPO` | 配置 | 默认 `StarMoe-org/moesekai-app-meta` |
 | 地区表 | 配置 | 包名、QooApp 条目 id、官网链接、是否 Nuverse |
 
 - **部署位置**：JP2，`apps` 命名空间，单副本。
 - **镜像**：.NET 运行时 + Il2CppDumper；在 MetaSekaiLab 仓库的 Actions 里构建，推到公开的 GHCR，JP2 不用凭据就能拉取。
-- **资源**：内存上限约 3GB（cn 的包 586MB，加上 Il2CppDumper），按 StarMoe 要求必须设置 request 和 limit；临时存储约 3GB。
+  - `Dockerfile`：编译阶段在构建机平台上跑，产物是与架构无关的 DLL（不带 apphost），最终阶段只有 COPY，所以 amd64 + arm64 两个架构都不需要 QEMU 编译。
+  - Il2CppDumper 按固定 commit `4741d46ba9cd6159c5d853eb9d6fc48b4bfa2b1a` 从 MetaMikuAI fork 构建（net8.0，用 .NET 10 运行时加 `DOTNET_ROLL_FORWARD=Major` 运行），`RequireAnyKey=false`。
+  - 以镜像自带的非 root 用户运行，工作站 GC（`DOTNET_gcServer=0`，子进程继承），只往 `/tmp` 写，可以只读根文件系统。
+  - `.github/workflows/ci.yml`：每次推送跑测试；main 分支和 `v*` 标签构建并推送 `ghcr.io/metasekailab/pjsk-meta-builder`，标签为 `sha-<短 sha>`、`latest`（main）、版本号（标签）。
+  - 部署参考 `deploy/k8s.yaml`、`deploy/README.md`（通用写法，不含集群地址）。
+- **资源**：cn 构建实测内存峰值约 2.2GB（含 Il2CppDumper 子进程），耗时约 20 秒（本机）；内存上限 3Gi，按 StarMoe 要求必须设置 request 和 limit；临时存储上限 3Gi。
 - **待验证**：JP2 能否访问 cn 官网链接和 QooApp。
+
+### 8.1 M5 状态（2026-11-10）
+
+- `serve` 已实现（`src/PjskMetaBuilder.Service`）：HMAC 双向签名、单任务串行队列、同地区 409、幂等 requestId、下载 → build → 发布流水线、带签名的回调与重试、错误分类。
+- 测试：HMAC（含与文档定义逐字比对、篡改、过期）；服务在本机随机端口跑起来，配假的流水线和假的同步服务，覆盖健康检查、未签名/错签/过期 401、非法请求 400、正常流程与回调签名、幂等与 409、串行顺序、五类错误的回调、回调失败重试到送达、未知任务 404。共 87 个测试通过。
+- 本机端到端：真实 `serve` + 真实流水线，en 请求 202、同地区再发 409、未签名 401；从 QooApp 下载、build、发布判为 `noop`（仓库无新提交），回调送达且用 Python 独立校验签名通过；任务目录已删除。
+- 镜像和 CI 已写好，本机没有 docker，**还没有实际构建过**；要在 MetaSekaiLab 仓库推送后由 Actions 验证。
+- 部署到 JP2 还没做：需要建 GitHub 仓库、把 GHCR 包设为公开、在 JP2 配 Secret，并确认部署方式。
 
 ## 9. 未决项与待验证
 
@@ -430,7 +464,7 @@ X-Moe-Signature: sha256=<hex(HMAC_SHA256(secret, timestamp + "." + body))>
 
 ## 10. 测试
 
-- **样本**（本机已有，在 `~/pjsk-analysis/`，不进仓库）：jp 7.1.0（workflow Release）、hmt 6.4.0（tw 原始包）、cn 6.4.1（官网）。
+- **样本**（本机已有，不进仓库）：jp 7.1.0（workflow Release）、hmt 6.4.0（tw 原始包）、cn 6.4.1（官网）。
 - **对照基准**：
   - 身份：与 workflow `identity.py` / sssekai `apphash` 的结果一致；
   - 密钥：SHA-256 前缀与 §5.5 的表一致；cn 的 [0] 能解开 master 186（PKCS7 正确，424 个顶层键）；
