@@ -56,7 +56,7 @@ static int Usage()
           pjsk-meta-builder publish --region <地区> --dir <build 输出目录> [--repo owner/name|路径] [--branch main] [--dry-run]
           pjsk-meta-builder run     （build 的全部参数）+ [--repo …] [--branch …] [--dry-run]：build 后直接 publish
 
-        publish 的写入凭据（--dry-run 不需要）：
+        publish 通过 GitHub API 读写（不克隆）；写入凭据（--dry-run 不需要）：
           GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY（PEM 内容）或 GITHUB_APP_PRIVATE_KEY_FILE
         """);
     return ExUsage;
@@ -81,7 +81,9 @@ static int PublishDir(Options o, string dir)
     var repo = o.Get("repo") ?? Environment.GetEnvironmentVariable("APP_META_REPO") ?? "StarMoe-org/moesekai-app-meta";
     var dryRun = o.Has("dry-run");
     string? token = null;
-    if (!dryRun && Git.IsGitHub(repo))
+    // dry-run 有凭据就用（避免匿名 API 的限流），没有就匿名读公开仓库
+    var haveCredentials = Environment.GetEnvironmentVariable("GITHUB_APP_ID") is { Length: > 0 };
+    if (Git.IsGitHub(repo) && (!dryRun || haveCredentials))
     {
         var appId = Environment.GetEnvironmentVariable("GITHUB_APP_ID")
             ?? throw new ArgumentException("缺少 GITHUB_APP_ID");

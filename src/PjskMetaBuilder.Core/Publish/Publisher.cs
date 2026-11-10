@@ -7,11 +7,12 @@ public sealed record PublishRequest(
     string BuildDir,
     string Repo = "StarMoe-org/moesekai-app-meta",
     string Branch = "main",
-    string? Token = null,
+    string? Token = null,                // GitHub installation token；dry-run 可以不给（公开仓库匿名读）
     bool DryRun = false,
-    string CommitterName = PublishRequest.BotName,
+    string CommitterName = PublishRequest.BotName,   // 仅本地裸仓库使用；GitHub API 提交固定是 App 的 bot
     string CommitterEmail = PublishRequest.BotEmail,
-    int MaxAttempts = 5)
+    int MaxAttempts = 5,
+    TimeSpan? RetryBaseDelay = null)
 {
     /// <summary>GitHub App moesekai-bot 的 bot 账号（App ID 5693240，bot 用户 id 354789470），提交会关联到该 App。</summary>
     public const string BotName = "moesekai-bot[bot]";
@@ -28,12 +29,13 @@ public sealed record PublishResult(
     IReadOnlyDictionary<string, string> Files);
 
 /// <summary>
-/// 设计文档 §5.8：浅克隆 → 按 §4.5 判定 → 写文件 → 一次提交 → push；push 被拒时重新克隆、重新判定。
-/// dry-run 时匿名克隆（公开仓库），判定完全相同，但不提交、不推送。
+/// 设计文档 §5.8：读分支头 → 在该提交上读 latest.json → 按 §4.5 判定 → 一个提交写入全部文件。
+/// 提交带“期望的父提交”，分支头已移动（别人先提交了）就重新读、重新判定，最多 MaxAttempts 次。
+/// dry-run 时判定完全相同，但不提交（GitHub 公开仓库可以匿名读）。
 /// </summary>
 public static class Publisher
 {
-    public static PublishResult Publish(PublishRequest request)
+    public static PublishResult Publish(PublishRequest request, IMetaRepository? repository = null)
     {
         var region = Regions.Get(request.Region);
         var files = ContentLinter.AllowedFiles
@@ -42,41 +44,30 @@ public static class Publisher
         var meta = ContentLinter.CheckDirectory(files, region.Nuverse);
         if (meta.GetProperty("region").GetString() != region.Code)
             throw new DataException($"meta.json 的 region 是 {meta.GetProperty("region").GetString()}，不是 {region.Code}");
-        if (!request.DryRun && string.IsNullOrEmpty(request.Token) && Git.IsGitHub(request.Repo))
+        if (!request.DryRun && repository is null && string.IsNullOrEmpty(request.Token) && Git.IsGitHub(request.Repo))
             throw new ArgumentException("没有写入凭据：需要 GitHub App（或用 --dry-run）");
 
+        var repo = repository ?? MetaRepositories.Open(request);
         var build = Identity(meta);
-        var git = new Git(request.DryRun ? null : request.Token, request.CommitterName, request.CommitterEmail);
+        var baseDelay = request.RetryBaseDelay ?? TimeSpan.FromSeconds(1);
         for (var attempt = 1; ; attempt++)
         {
-            var work = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "pjsk-meta-publish", Guid.NewGuid().ToString("N"));
-            try
-            {
-                var outcome = Attempt(request, region.Code, files, build, git, work);
-                if (outcome is not null)
-                    return outcome;
-            }
-            finally
-            {
-                if (Directory.Exists(work))
-                    Directory.Delete(work, true);
-            }
+            var outcome = Attempt(request, region.Code, files, build, repo);
+            if (outcome is not null)
+                return outcome;
             if (attempt >= request.MaxAttempts)
-                throw new HttpRequestException($"连续 {attempt} 次 push 被拒绝");
-            Thread.Sleep(TimeSpan.FromSeconds(Math.Min(Math.Pow(2, attempt), 20)));
+                throw new HttpRequestException($"连续 {attempt} 次提交时分支已被别人更新");
+            Thread.Sleep(TimeSpan.FromTicks(Math.Min(baseDelay.Ticks << attempt, TimeSpan.FromSeconds(20).Ticks)));
         }
     }
 
-    /// <summary>返回 null 表示 push 被拒（远端有新提交），需要重来。</summary>
+    /// <summary>返回 null 表示分支头已移动，需要重来。</summary>
     private static PublishResult? Attempt(PublishRequest request, string region, Dictionary<string, byte[]> files,
-        VersionIdentity build, Git git, string work)
+        VersionIdentity build, IMetaRepository repo)
     {
-        CloneOrInit(git, request, work);
-
-        var latestPath = System.IO.Path.Combine(work, region, "latest.json");
-        VersionIdentity? latest = File.Exists(latestPath)
-            ? Identity(JsonDocument.Parse(File.ReadAllBytes(latestPath)).RootElement)
-            : null;
+        var head = repo.Head();
+        var latestBytes = head is null ? null : repo.ReadFile(head, $"{region}/latest.json");
+        VersionIdentity? latest = latestBytes is null ? null : Identity(JsonDocument.Parse(latestBytes).RootElement);
         var plan = UpdatePlanner.Plan(latest, build);
         var hashes = files.ToDictionary(kv => kv.Key, kv => Output.Artifacts.Sha256Hex(kv.Value));
 
@@ -84,68 +75,33 @@ public static class Publisher
             return Result(plan, request, null, null, latest, hashes);
 
         var relDir = $"{region}/{plan.Directory}";
-        var dir = System.IO.Path.Combine(work, region, plan.Directory!);
-        var writes = new List<string>();
-        if (Directory.Exists(dir))
+        var writes = new SortedDictionary<string, byte[]>(StringComparer.Ordinal);
+        var existingBytes = head is null ? null : repo.ReadFile(head, $"{relDir}/meta.json");
+        if (existingBytes is not null)
         {
             // 已发布的目录永不改写：身份相同就视为已发布；不同就报错
-            var existingMeta = System.IO.Path.Combine(dir, "meta.json");
-            var existing = File.Exists(existingMeta) ? Identity(JsonDocument.Parse(File.ReadAllBytes(existingMeta)).RootElement) : null;
+            var existing = Identity(JsonDocument.Parse(existingBytes).RootElement);
             if (existing != build)
                 throw new DataException($"{relDir} 已经存在，但内容属于另一个构建（{existing}）；已发布的目录不能修改");
         }
         else
         {
-            Directory.CreateDirectory(dir);
             foreach (var (name, bytes) in files)
-            {
-                File.WriteAllBytes(System.IO.Path.Combine(dir, name), bytes);
-                writes.Add($"{relDir}/{name}");
-            }
+                writes[$"{relDir}/{name}"] = bytes;
         }
         if (plan.UpdateLatest)
-        {
-            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(latestPath)!);
-            File.WriteAllBytes(latestPath, files["meta.json"]);
-            writes.Add($"{region}/latest.json");
-        }
+            writes[$"{region}/latest.json"] = files["meta.json"];
         if (writes.Count == 0)
             return Result(plan with { Outcome = PublishOutcome.Noop, Reason = plan.Reason + "（版本目录已存在）" },
                 request, relDir, null, latest, hashes);
         if (request.DryRun)
             return Result(plan, request, relDir, null, latest, hashes);
 
-        git.Check(work, ["add", "--", .. writes]);
         var message = plan.Outcome == PublishOutcome.SnapshotOnly
             ? $"{region}: 补充 {build.AppVersion} (versionCode {build.VersionCode})"
             : $"{region}: {latest?.AppVersion ?? "∅"} → {plan.Directory} (versionCode {build.VersionCode})";
-        git.Check(work, "commit", "-q", "-m", message);
-        var (code, _, err) = git.Run(work, "push", "-q", "origin", $"HEAD:{request.Branch}");
-        if (code != 0)
-        {
-            if (err.Contains("rejected") || err.Contains("fetch first") || err.Contains("non-fast-forward"))
-                return null;
-            throw new GitException($"git push 失败：{Git.Trim(err)}", err);
-        }
-        var commit = git.Check(work, "rev-parse", "HEAD").Trim();
-        return Result(plan, request, relDir, commit, latest, hashes);
-    }
-
-    private static void CloneOrInit(Git git, PublishRequest request, string work)
-    {
-        var url = Git.RemoteUrl(request.Repo);
-        var (code, heads, err) = git.Run(null, "ls-remote", "--heads", url, request.Branch);
-        if (code != 0)
-            throw new HttpRequestException($"读取产物仓库失败：{Git.Trim(err)}");
-        if (heads.Trim().Length > 0)
-        {
-            git.Check(null, "clone", "-q", "--depth", "1", "--branch", request.Branch, url, work);
-            return;
-        }
-        // 空仓库（第一次发布）
-        Directory.CreateDirectory(work);
-        git.Check(work, "init", "-q", "-b", request.Branch);
-        git.Check(work, "remote", "add", "origin", url);
+        var commit = repo.Commit(head, writes, message);
+        return commit is null ? null : Result(plan, request, relDir, commit, latest, hashes);
     }
 
     private static VersionIdentity Identity(JsonElement meta) => new(

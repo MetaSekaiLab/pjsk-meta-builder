@@ -277,14 +277,26 @@ masterdata 同步服务（另一个独立项目，Go）需要每个服当前版�
 
 ### 5.8 发布
 
-1. 用 GitHub App 私钥换 installation token，**只申请 `moesekai-app-meta` 一个仓库**的 `contents: write`。token 通过环境变量注入 git，不出现在命令行参数和 `.git/config` 里。
-2. 浅克隆 `main` → 按 §4.5 判定 → 写文件 → 一次提交 → push。push 被拒（别人先推了）时重新克隆、重新判定，最多 5 次。
-3. 提交者：App 的 bot 身份；提交信息：`<region>: <旧版本> → <新版本> (versionCode <n>)`。
-4. 返回结果、commit sha 和每个文件的 sha256，回调时带上。
-5. 提交身份固定为 GitHub App 的 bot 账号 `moesekai-bot[bot] <354789470+moesekai-bot[bot]@users.noreply.github.com>`（`PublishRequest` 可覆盖；同步服务也用这个身份），git 子进程会清掉外部的 `GIT_AUTHOR_*` / `GIT_COMMITTER_*`，避免被运行环境的身份覆盖。
-6. 产物仓库为空（第一次发布）时直接 `git init` 并推到 `main`。
+1. 用 GitHub App（`moesekai-bot`，App ID 5693240，归 StarMoe-org）的私钥换 installation token，**只申请 `moesekai-app-meta` 一个仓库**的 `contents: write`。token 只在内存里用于 API 请求，不落盘、不进命令行参数。
+2. **全程走 GitHub API，不克隆、不用 git 命令行**：
+   1. 读分支头：`GET /repos/{o}/{r}/git/ref/heads/main`，得到提交 `H`。
+   2. 固定在 `H` 上读 `<region>/latest.json` 和目标目录的 `meta.json`：`GET /repos/{o}/{r}/contents/{path}?ref=H`（raw）。判定和写入看到的是同一个版本。
+   3. 按 §4.5 判定。
+   4. 用 GraphQL `createCommitOnBranch` 一次写入版本目录的全部文件和 `latest.json`，`expectedHeadOid = H`：一次调用就是一个提交，不会出现只写了一半的状态。
+   5. 分支头已经不是 `H`（别人先提交了，GitHub 返回 `STALE_DATA`）时，从第 1 步重来，最多 5 次，间隔指数退避（上限 20 秒）。
+3. 提交由 GitHub 以 App 的 bot 身份 `moesekai-bot[bot]` 创建并签名，在 GitHub 上显示 Verified。作者无需（也不能）指定；同步服务写 `moesekai-masterdata-<region>` 也用同一个 App、同样的方式。
+4. 提交信息：`<region>: <旧版本> → <新目录> (versionCode <n>)`；补旧版本快照时为 `<region>: 补充 <版本> (versionCode <n>)`。只有标题行。
+5. 返回结果、commit sha 和每个文件的 sha256，回调时带上。
+6. API 不能在空仓库上创建第一个提交：新仓库需要先有 `main` 分支（例如建仓库时带 README）。`moesekai-app-meta` 已经满足。
+7. 错误分类：5xx、429、限流（403 且剩余额度为 0）→ 网络类，可重试（退出码 75）；其他 4xx 和 GraphQL 错误 → 内部错误（多为权限或配置问题）。
+8. 读写都在 `IMetaRepository` 接口后面：GitHub 用 `GitHubApiRepository`；本地裸仓库用 `LocalGitRepository`（测试和离线演练用，底层命令 `commit-tree` + 带旧值的 `update-ref`，同样是乐观并发；提交身份固定为上面的 bot 账号，并清掉外部 `GIT_AUTHOR_*` / `GIT_COMMITTER_*`）。
 
-**M3 状态**：`publish` / `run` 已实现；用本地裸仓库覆盖了首发、重复（noop）、旧版本补目录、同版本新构建（`+versionCode` 目录）、拒绝、已存在目录属于其他构建时报错、dry-run 不写入；JWT 签名有单元测试。push 被拒后重试的路径还没有自动化测试。2026-11-10 已建公开空仓库 `StarMoe-org/moesekai-app-meta`，用 jp 7.1.0、cn 6.4.1、hmt 6.4.0 的 build 产物做 dry-run，均判 `advanced`（空仓库首发路径），仓库保持为空。GitHub App 已建，真实写入待验证。
+**M3 状态**（2026-11-10）：
+
+- `publish` / `run` 已实现。本地裸仓库测试覆盖首发、重复（noop）、旧版本补目录、同版本新构建（`+versionCode` 目录）、拒绝、已存在目录属于其他构建时报错、dry-run 不写入、**提交前分支被别人更新后的重试**；`GitHubApiRepository` 用假的 HTTP 处理器测试了请求形状、路径转义（`+`）、`STALE_DATA`、错误分类；JWT 签名有单元测试。
+- 已建公开仓库 `StarMoe-org/moesekai-app-meta` 和 GitHub App `moesekai-bot`（只装在这个仓库上，权限 contents 写 + metadata 读）。验证了 token 只能看到这一个仓库。
+- 首次真实发布（当时还是 git push 方式）：jp 7.1.0（`85f73c6`）、cn 6.4.1（`6606808`），作者和提交者均为 `moesekai-bot[bot]`，但 git push 的提交没有签名，GitHub 上不显示 Verified。之后改为上面的 API 方式；这两个提交保留原样，不改写历史。
+- 改为 API 方式后，对真实仓库验证了只读路径：jp、cn 重复发布判为 `noop`，hmt dry-run（带 token 和匿名各一次）判为 `advanced`，仓库没有新提交。**API 提交的真实写入还没有验证**，下一次发布（hmt）会是第一次。
 
 ## 6. 命令行
 
@@ -297,7 +309,8 @@ pjsk-meta-builder serve   --listen :8080                         # HTTP 服务�
 pjsk-meta-builder inspect --apk x.apk                            # 只读：清单、身份、密钥哈希前缀（不打印密钥）
 ```
 
-- `build` 不需要任何凭据；`--dry-run` 时匿名克隆公开仓库，判定逻辑完全相同，但不推送。
+- `build` 不需要任何凭据；`--dry-run` 时判定逻辑完全相同，但不提交。有 App 凭据就带 token 读，没有就匿名读公开仓库（匿名 API 每小时 60 次）。
+- `--repo` 可以是 `owner/name`（走 GitHub API）或本地裸仓库路径（走 git 命令行）。
 - 退出码：0 成功；75 网络类失败（可重试）；65 数据类失败；其他为内部错误。
 
 ## 7. HTTP 服务
@@ -384,7 +397,7 @@ X-Moe-Signature: sha256=<hex(HMAC_SHA256(secret, timestamp + "." + body))>
   - 密钥：SHA-256 前缀与 §5.5 的表一致；cn 的 [0] 能解开 master 186（PKCS7 正确，424 个顶层键）；
   - 结构文件：与 Haruki 生成器的输出逐类、逐字段比对，差异只能是 §5.6 列出的已知项；用 master 186 逐表核对行宽和类型。
 - **单元测试**：AXML 解析、metadata 解密（用构造数据）、版本比较、更新规则全部分支、0/1 位串编解码、内容检查、HMAC 签名与时间窗、回调重试。
-- **发布测试**：用本地裸仓库当作产物仓库，覆盖 §4.5 每种情况和 push 被拒后的重试。
+- **发布测试**：用本地裸仓库当作产物仓库，覆盖 §4.5 每种情况和分支被别人更新后的重试；GitHub API 部分用假的 HTTP 处理器测试。
 
 ## 11. 里程碑
 

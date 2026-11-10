@@ -78,7 +78,7 @@ internal static class FakeBuild
 public class ContentLinterTests
 {
     private static Dictionary<string, byte[]> Load(string dir) =>
-        Directory.GetFiles(dir).ToDictionary(Path.GetFileName, File.ReadAllBytes)!;
+        Directory.GetFiles(dir).ToDictionary(f => Path.GetFileName(f), File.ReadAllBytes);
 
     private const string Hash = "d67a688b-ff78-4300-bfc5-2120c000d75d";
 
@@ -185,6 +185,39 @@ public class PublisherTests
         Assert.Throws<DataException>(() => Publish(repo, "jp", FakeBuild.Create("jp", "7.1.0", HashB, 100)));
     }
 
+    /// <summary>第一次提交前别人抢先推了一个提交：应当重新读取、重新判定，并在新的分支头上提交成功。</summary>
+    [Fact]
+    public void RetriesWhenBranchMovesBeforeCommit()
+    {
+        var path = NewBareRepo();
+        var inner = new LocalGitRepository(path, "main", PublishRequest.BotName, PublishRequest.BotEmail);
+        Publish(path, "cn", FakeBuild.Create("cn", "6.4.1", HashA, 4647, nuverse: true));
+        var racing = new RacingRepository(inner, () =>
+            Publish(path, "jp", FakeBuild.Create("jp", "7.1.0", HashA, 100)));
+
+        var r = Publisher.Publish(new PublishRequest("cn", FakeBuild.Create("cn", "6.5.0", HashB, 4700, nuverse: true), path,
+            RetryBaseDelay: TimeSpan.Zero), racing);
+
+        Assert.Equal(("advanced", "cn/6.5.0", "6.4.1"), (r.Result, r.Path, r.OldAppVersion));
+        Assert.Equal(2, racing.Commits);   // 第一次因分支已移动失败，第二次成功
+        Assert.Contains("jp/latest.json", Tree(path));
+        Assert.Contains("cn/6.5.0/schema.json", Tree(path));
+    }
+
+    /// <summary>在第一次 Commit 之前先执行一次 <paramref name="race"/>（模拟并发提交）。</summary>
+    private sealed class RacingRepository(IMetaRepository inner, Action race) : IMetaRepository
+    {
+        public int Commits { get; private set; }
+        public string? Head() => inner.Head();
+        public byte[]? ReadFile(string commit, string path) => inner.ReadFile(commit, path);
+        public string? Commit(string? parent, IReadOnlyDictionary<string, byte[]> files, string message)
+        {
+            if (Commits++ == 0)
+                race();
+            return inner.Commit(parent, files, message);
+        }
+    }
+
     [Fact]
     public void RegionMismatchIsRejected()
     {
@@ -212,5 +245,109 @@ public class GitHubAppTokenTests
         Assert.True(payload.GetProperty("exp").GetInt64() - now.ToUnixTimeSeconds() <= 600);
         Assert.True(rsa.VerifyData(Encoding.ASCII.GetBytes($"{parts[0]}.{parts[1]}"), B64(parts[2]),
             HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1));
+    }
+}
+
+public class GitHubApiRepositoryTests
+{
+    private sealed class FakeHandler(Func<HttpRequestMessage, string?, HttpResponseMessage> respond) : HttpMessageHandler
+    {
+        public List<(HttpRequestMessage Request, string? Body)> Requests { get; } = [];
+
+        protected override HttpResponseMessage Send(HttpRequestMessage request, CancellationToken ct)
+        {
+            var body = request.Content?.ReadAsStringAsync(ct).GetAwaiter().GetResult();
+            Requests.Add((request, body));
+            return respond(request, body);
+        }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct) =>
+            Task.FromResult(Send(request, ct));
+    }
+
+    private static HttpResponseMessage Json(string json, System.Net.HttpStatusCode code = System.Net.HttpStatusCode.OK) =>
+        new(code) { Content = new StringContent(json, Encoding.UTF8, "application/json") };
+
+    private static (GitHubApiRepository Repo, FakeHandler Handler) Create(Func<HttpRequestMessage, string?, HttpResponseMessage> respond)
+    {
+        var handler = new FakeHandler(respond);
+        return (new GitHubApiRepository("o", "r", "main", "tkn", new HttpClient(handler), "https://api.test"), handler);
+    }
+
+    [Fact]
+    public void HeadOfEmptyRepositoryIsNull()
+    {
+        var (repo, _) = Create((_, _) => Json("""{"message":"Git Repository is empty."}""", System.Net.HttpStatusCode.Conflict));
+        Assert.Null(repo.Head());
+    }
+
+    [Fact]
+    public void HeadReadsRefSha()
+    {
+        var (repo, h) = Create((_, _) => Json("""{"object":{"sha":"abc"}}"""));
+        Assert.Equal("abc", repo.Head());
+        Assert.Equal("https://api.test/repos/o/r/git/ref/heads/main", h.Requests[0].Request.RequestUri!.ToString());
+        Assert.Equal("Bearer tkn", h.Requests[0].Request.Headers.Authorization!.ToString());
+    }
+
+    [Fact]
+    public void ReadFileEscapesPathAndPinsCommit()
+    {
+        var (repo, h) = Create((req, _) => req.RequestUri!.AbsolutePath.Contains("missing")
+            ? Json("""{"message":"Not Found"}""", System.Net.HttpStatusCode.NotFound)
+            : new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new ByteArrayContent([1, 2, 3]) });
+        Assert.Equal(new byte[] { 1, 2, 3 }, repo.ReadFile("c0ffee", "jp/7.1.0+101/meta.json"));
+        Assert.Null(repo.ReadFile("c0ffee", "jp/missing/meta.json"));
+        var uri = h.Requests[0].Request.RequestUri!;
+        Assert.Equal("/repos/o/r/contents/jp/7.1.0%2B101/meta.json", uri.AbsolutePath);
+        Assert.Equal("?ref=c0ffee", uri.Query);
+        Assert.Contains("application/vnd.github.raw+json", h.Requests[0].Request.Headers.Accept.ToString());
+    }
+
+    [Fact]
+    public void CommitSendsSingleMutationWithExpectedHead()
+    {
+        var (repo, h) = Create((_, _) => Json("""{"data":{"createCommitOnBranch":{"commit":{"oid":"new"}}}}"""));
+        var oid = repo.Commit("old", new Dictionary<string, byte[]> { ["cn/latest.json"] = "{}"u8.ToArray(), ["cn/6.4.1/meta.json"] = [0xff] }, "cn: ∅ → 6.4.1");
+
+        Assert.Equal("new", oid);
+        Assert.Single(h.Requests);
+        Assert.Equal("https://api.test/graphql", h.Requests[0].Request.RequestUri!.ToString());
+        var input = JsonDocument.Parse(h.Requests[0].Body!).RootElement.GetProperty("variables").GetProperty("input");
+        Assert.Equal("old", input.GetProperty("expectedHeadOid").GetString());
+        Assert.Equal("o/r", input.GetProperty("branch").GetProperty("repositoryNameWithOwner").GetString());
+        Assert.Equal("cn: ∅ → 6.4.1", input.GetProperty("message").GetProperty("headline").GetString());
+        var additions = input.GetProperty("fileChanges").GetProperty("additions").EnumerateArray()
+            .Select(a => (a.GetProperty("path").GetString(), a.GetProperty("contents").GetString())).ToArray();
+        Assert.Equal([("cn/6.4.1/meta.json", "/w=="), ("cn/latest.json", "e30=")], additions);
+    }
+
+    [Fact]
+    public void StaleHeadReturnsNull()
+    {
+        var (repo, _) = Create((_, _) => Json("""{"data":{"createCommitOnBranch":null},"errors":[{"type":"STALE_DATA","message":"Expected branch to point to \"old\" but it did not. Pull and try again."}]}"""));
+        Assert.Null(repo.Commit("old", new Dictionary<string, byte[]> { ["a"] = [1] }, "m"));
+    }
+
+    [Fact]
+    public void OtherGraphQlErrorsThrow()
+    {
+        var (repo, _) = Create((_, _) => Json("""{"errors":[{"type":"FORBIDDEN","message":"Resource not accessible by integration"}]}"""));
+        Assert.Throws<InvalidOperationException>(() => repo.Commit("old", new Dictionary<string, byte[]> { ["a"] = [1] }, "m"));
+    }
+
+    [Fact]
+    public void ServerErrorsAreRetryable()
+    {
+        var (repo, _) = Create((_, _) => Json("{}", System.Net.HttpStatusCode.BadGateway));
+        Assert.Throws<HttpRequestException>(() => repo.Head());
+    }
+
+    [Fact]
+    public void CannotCreateFirstCommitOnEmptyRepository()
+    {
+        var (repo, h) = Create((_, _) => Json("{}"));
+        Assert.Throws<InvalidOperationException>(() => repo.Commit(null, new Dictionary<string, byte[]> { ["a"] = [1] }, "m"));
+        Assert.Empty(h.Requests);
     }
 }
