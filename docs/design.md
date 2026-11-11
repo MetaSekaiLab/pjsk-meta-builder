@@ -1,9 +1,9 @@
 # pjsk-meta-builder 设计文档
 
-> 状态：设计中，尚未实现
-> 代码仓库：`MetaSekaiLab/pjsk-meta-builder`（私有，尚未创建）
-> 产物仓库：`StarMoe-org/moesekai-app-meta`（公开，尚未创建）
-> 最后更新：2026-11-10
+> 状态：M1–M5 已实现并部署到 JP2；M6（主动发现新安装包）设计中
+> 代码仓库：`MetaSekaiLab/pjsk-meta-builder`（公开）
+> 产物仓库：`StarMoe-org/moesekai-app-meta`（公开）
+> 最后更新：2026-11-11
 
 ## 1. 背景与目标
 
@@ -12,7 +12,9 @@ masterdata 同步服务（另一个独立项目，Go）需要每个服当前版�
 - CP 服（jp / en）登录要用 appVersion、appHash，所有 API 请求都要用 API 密钥加解密；
 - Nuverse 服（hmt / kr / cn）的 master 是数组格式，要用和版本对应的**结构文件**还原字段名，CDN 上的 master 要用客户端里的密钥解密。
 
-这些都只能从安装包里取得，而且每次 App 更新都可能变化。pjsk-meta-builder 负责：**拿到安装包 → 提取元数据 → 发布到公开产物仓库 → 通知同步服务**。
+这些都只能从安装包里取得，而且每次 App 更新都可能变化。pjsk-meta-builder 负责：**发现新安装包 → 拿到安装包 → 提取元数据 → 发布到公开产物仓库 → 通知同步服务**。
+
+和同步服务的分工（2026-11-11 定，B14）：**跟安装包有关的都归 builder**（来源轮询、下载、凭据、处理、发布）；**跟游戏 API 有关的都归同步服务**（登录、master、数据仓库）。两边只经 `moesekai-app-meta` 和带签名的回调交接。
 
 **第一版目标**
 
@@ -25,7 +27,7 @@ masterdata 同步服务（另一个独立项目，Go）需要每个服当前版�
 - 不拉取、不处理 master 本身（那是同步服务的事），只在测试中用 master 做核对。
 - 不下载、不解包素材资源。
 - 不保存任何账号凭据，不调用需要登录的游戏 API。
-- 不决定「什么时候处理哪个版本」：由同步服务发起请求（§7）。
+- 不调用游戏 API：「游戏服务器认为当前版本过期」这类信号由同步服务发现，再经 `POST /v1/builds` 告诉 builder（§7.6）。
 
 ## 2. 已定决策
 
@@ -44,6 +46,7 @@ masterdata 同步服务（另一个独立项目，Go）需要每个服当前版�
 | B11 | 与同步服务的交互 | 同步服务发请求 → 处理 → **先推产物仓库，再回调**；双向 HMAC-SHA256 |
 | B12 | 部署 | JP2，与同步服务同一集群，只走内网 |
 | B13 | 输出要求 | 不要求和 Haruki 逐字节一致 |
+| B14 | 发现新安装包 | **builder 自己轮询**安装包来源（官网 / Google Play 网页 / QooApp），发现新版本就处理并发布，再通知同步服务；同步服务不轮询安装包来源，只在游戏 API 报版本过期或数据对不上时催 builder（§7.5、§7.6） |
 
 ## 3. 处理流程
 
@@ -419,6 +422,28 @@ X-Moe-Signature: sha256=<hex(HMAC_SHA256(secret, timestamp + "." + body))>
 - 回调在后台重试，不占用下一个任务。
 - 任务状态只在内存里（保留最近 200 个已结束任务），重启后丢失；同步服务收不到回调时会重新发起或检查仓库。
 
+### 7.5 主动发现新安装包（M6，设计中）
+
+服务里加一个后台轮询器，按区服查安装包来源，和产物仓库的 `<region>/latest.json` 比较；有更新就往现有的单任务队列里放一个任务（和同步服务发来的请求走同一条路：同一地区不重复、同一时间只跑一个）。builder 自己不存状态，基准永远是产物仓库。
+
+| 来源 | 区服 | 间隔（默认） | 能拿到 | 判定为新版本 |
+| --- | --- | --- | --- | --- |
+| 官网链接 | cn | 10 分钟 | 跟随重定向、只取 1 字节，从文件名（`pjsk_…_v23509_4647…apk`）读 versionCode | versionCode 大于 latest 的 `package.versionCode` |
+| QooApp 详情 | jp / en / hmt / kr | 15 分钟 | versionName、versionCode、是否可下载（`Probe`） | versionCode 更大，或 versionName 更大 |
+| Google Play 网页 | jp / en / hmt / kr | 15 分钟 | `play.google.com/store/apps/details?id=…` 内嵌数据 `ds:5` 里的 versionName、最后更新时间；**没有 versionCode**；cn 不在 Google Play 上 | versionName 更大 → 作为提前信号发起任务，下载仍走 QooApp |
+
+- 间隔都加 ±10% 随机抖动，可用环境变量调整；某个来源连续失败时单独退避（最长 2 小时），不影响其他来源。
+- Google Play 先于 QooApp 看到新版本时，任务会以 `not_ready` 结束；轮询器对这个区服退避后再发（10 分钟起，翻倍，最长 2 小时），直到 QooApp 上架或版本追平。`not_ready` 不回调同步服务（不是它发起的，也没有新产物）。
+- Google Play 网页是 Google 的内部数据格式，解析失败只记告警、把这个来源标成失效，不影响其他来源。2026-11-11 从本机和 JP2 实测四个包都能取到（每次约 0.3 秒，无需凭据）。匿名 playfetch 不用：依赖第三方公共账号池，本机实测被 Cloudflare 拦截。
+- 只在发布结果为 `advanced` 时通知同步服务（§7.6）；`snapshot_only` / `noop` / `rejected` 只写日志。
+- 自检加一项「Google Play」。
+
+### 7.6 和同步服务的配合
+
+- **回调地址固定配置**：`SYNC_CALLBACK_URL`。builder 自己发起的任务完成后发到这个地址，格式同 §7.2，`requestId` 以 `auto-` 开头。同步服务通过 `POST /v1/builds` 发起的任务仍按请求里的 `callback` 回调（可省略，省略时用 `SYNC_CALLBACK_URL`）。
+- **同步服务先发现的情况**（builder 漏掉了，或来源还没更新）：游戏 API 返回 426 / `appVersionStatus: not_available`，或 master 和结构文件对不上。同步服务先重读 `latest.json`，没有更新的版本才调用 `POST /v1/builds`；builder 正在处理同一区服时返回 409，同步服务等回调即可。
+- 两边启动时都先读一次 `latest.json`。
+
 ## 8. 配置与部署
 
 | 配置 | 来源 | 说明 |
@@ -426,6 +451,8 @@ X-Moe-Signature: sha256=<hex(HMAC_SHA256(secret, timestamp + "." + body))>
 | `GITHUB_APP_ID`、`GITHUB_APP_PRIVATE_KEY` | Secret | StarMoe-org 的 App，与同步服务共用 |
 | `MOE_HMAC_SECRET`（或 `_FILE`） | Secret | 与同步服务共用，至少 32 个字符，不够时拒绝启动 |
 | `QOOAPP_TOKEN`（或 `QOOAPP_TOKEN_FILE`） | Secret | jp、en、hmt、kr 下载；可选 `QOOAPP_USER_ID`、`QOOAPP_DEVICE_ID` |
+| `SYNC_CALLBACK_URL` | 配置 | 自己发起的任务完成后通知同步服务的地址（§7.6，M6） |
+| `PJSK_WATCH`、`PJSK_WATCH_REGIONS` | 配置 | 是否启用主动轮询、轮询哪些区服（M6；默认关，部署时打开） |
 | `PJSK_CACHE_DIR` | 配置 | 命令行的下载缓存目录（服务不用，见 §7.4） |
 | `PJSK_WORK_ROOT`、`PORT` | 配置 | 服务的任务临时目录（镜像默认 `/tmp/pjsk-meta-jobs`）和端口（默认 8080） |
 | `IL2CPPDUMPER_DLL`、`PJSK_DOTNET` | 配置 | 镜像里已设好 `/opt/il2cppdumper/Il2CppDumper.dll` |
@@ -459,7 +486,7 @@ X-Moe-Signature: sha256=<hex(HMAC_SHA256(secret, timestamp + "." + body))>
 | --- | --- | --- |
 | Q1 | ~~密钥字段的定位方法（§5.5）~~ | **已解决**：反汇编 `APIManager..cctor`（§5.5 方案 1）动态定位密钥字段，能跟随密钥更换；已知哈希表降为兜底 + 交叉校验。jp/cn/en 两法结果一致 |
 | Q2 | ~~`compact*` 表和 SuiteMaster 之外的顶层键怎么描述~~ | **已解决（M2）**：compact 表就是 SuiteMaster 的成员（按列存放的类），见 §4.4；SuiteMaster 之外的表行都是对象，原样输出 |
-| Q3 | Nuverse 服 API 请求实际用 [0] 还是 [1] | 等同步服务拿到 cn 账号 accessToken、实测 `user/auth` 时确认；不影响 builder |
+| Q3 | ~~Nuverse 服 API 请求实际用 [0] 还是 [1]~~ | **已解决（2026-11-11 cn 实测）**：服务器按 `X-App-Hash` 选密钥，当前版本用 [0]、旧版本用 [1]。另：Nuverse 客户端实际发送的 `X-App-Version` 是四段 `{versionName}.{versionCode}`（`GameConfig.appVersion`，cn 6.4.1 为 `6.4.1.4647`），服务器只看前三段；同步服务可从 meta.json 的 `package` 自行拼出。以后可在 meta.json 加可选字段 `apiAppVersion` |
 | Q4 | ~~QooApp 上 jp 的分包里，`assets/bin/Data` 是否完整在主包~~ | **已解决（M4）**：jp 7.1.0 从 QooApp 下载为主包 + 2 个拆分包，按虚拟文件系统查找即可，结果与 workflow Release 包完全一致 |
 | Q5 | AssetsTools.NET 读取没有 typetree 的 MonoBehaviour | 按 §5.3 的固定字段顺序手工读；用 jp 7.1.0、cn 6.4.1 的结果与 workflow（Python）对照 |
 | Q6 | ~~JP2 出网~~ | **已解决**：2026-11-11 在 JP2 上自检 8/8 通过，cn 官网链接（`lf9-apk.ugapk.cn`）、QooApp 四个区服（`api.qoo-app.com`、`d3`/`d7.qoo-apk.com`）、GitHub App 都可直连 |
@@ -484,3 +511,4 @@ X-Moe-Signature: sha256=<hex(HMAC_SHA256(secret, timestamp + "." + body))>
 | M3 发布 | GitHub App token、更新规则、内容检查、`publish`/`run` | 本地裸仓库覆盖全部规则；对真实 `moesekai-app-meta` 做一次 dry-run |
 | M4 下载源 | 官网链接、QooApp、期望 versionCode、错误分类 | 实际下载 cn 和 jp 并跑通 `run --dry-run` |
 | M5 服务 | `serve`、HMAC、排队、回调、镜像、部署 JP2 | 用 curl 模拟同步服务发起请求，收到回调，仓库出现对应提交 |
+| M6 主动发现 | 轮询器（官网 / QooApp / Google Play）、`SYNC_CALLBACK_URL`、自检加 Google Play | 用假来源和本地裸仓库测到「发现 → 处理 → advanced → 回调」；JP2 上开启后日志显示各来源检查正常 |
