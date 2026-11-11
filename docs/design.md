@@ -437,7 +437,7 @@ X-Moe-Signature: sha256=<hex(HMAC_SHA256(secret, timestamp + "." + body))>
   - `Dockerfile`：编译阶段在构建机平台上跑，产物是与架构无关的 DLL（不带 apphost），最终阶段只有 COPY，所以 amd64 + arm64 两个架构都不需要 QEMU 编译。
   - Il2CppDumper 按固定 commit `4741d46ba9cd6159c5d853eb9d6fc48b4bfa2b1a` 从 MetaMikuAI fork 构建（net8.0，用 .NET 10 运行时加 `DOTNET_ROLL_FORWARD=Major` 运行），`RequireAnyKey=false`。
   - 以镜像自带的非 root 用户运行，工作站 GC（`DOTNET_gcServer=0`，子进程继承），只往 `/tmp` 写，可以只读根文件系统。
-  - `.github/workflows/ci.yml`：每次推送跑测试；main 分支和 `v*` 标签构建并推送 `ghcr.io/metasekailab/pjsk-meta-builder`，标签为 `sha-<短 sha>`、`latest`（main）、版本号（标签）。
+  - `.github/workflows/ci.yml`：每次推送跑测试，PR 上试构建镜像，`v*` 标签发版本号和 `latest`。`deploy.yml`（StarMoe 标准模板）：main 构建 12 位 sha 和 `main` 标签，再通知 Ferry 更新集群里的服务（见 deploy/README.md）。
   - 部署参考 `deploy/k8s.yaml`、`deploy/README.md`（通用写法，不含集群地址）。
 - **资源**：cn 构建实测内存峰值约 2.2GB（含 Il2CppDumper 子进程），耗时约 20 秒（本机）；内存上限 3Gi，按 StarMoe 要求必须设置 request 和 limit；临时存储上限 3Gi。
 - **待验证**：JP2 能否访问 cn 官网链接和 QooApp。
@@ -447,11 +447,11 @@ X-Moe-Signature: sha256=<hex(HMAC_SHA256(secret, timestamp + "." + body))>
 - `serve` 已实现（`src/PjskMetaBuilder.Service`）：HMAC 双向签名、单任务串行队列、同地区 409、幂等 requestId、下载 → build → 发布流水线、带签名的回调与重试、错误分类。
 - 测试：HMAC（含与文档定义逐字比对、篡改、过期）；服务在本机随机端口跑起来，配假的流水线和假的同步服务，覆盖健康检查、未签名/错签/过期 401、非法请求 400、正常流程与回调签名、幂等与 409、串行顺序、五类错误的回调、回调失败重试到送达、未知任务 404。共 87 个测试通过。
 - 本机端到端：真实 `serve` + 真实流水线，en 请求 202、同地区再发 409、未签名 401；从 QooApp 下载、build、发布判为 `noop`（仓库无新提交），回调送达且用 Python 独立校验签名通过；任务目录已删除。
-- 镜像和 CI 已写好，本机没有 docker，**还没有实际构建过**；要在 MetaSekaiLab 仓库推送后由 Actions 验证。
 - 已建公开仓库 `MetaSekaiLab/pjsk-meta-builder`，CI 测试与镜像构建通过；GHCR 包已设为公开，匿名可拉取（amd64 + arm64，压缩后约 93MB）。
 - 为部署补了**出网自检**：`selftest` 命令，或 `PJSK_SELFTEST=1` 时服务启动后自动跑一次，结果写日志、`/healthz` 显示通过数。检查 Il2CppDumper、工作目录、QooApp 四个条目（查条目 + 主包和拆分包各取 1 字节）、cn 官网链接（取 1 字节）、GitHub App（换 token + 读分支），不下载安装包、不写仓库。本机 8/8 通过。
 - `GITHUB_APP_PRIVATE_KEY` 接受原样 PEM、`\n` 转义的 PEM 或 base64（面板环境变量常不支持多行）。
-- 部署到 JP2：用面板部署镜像，配 Secret，看自检日志（§9 Q6）。
+- **已部署到 JP2**（2026-11-11）：在节点本机用 `kubectl create` 首次创建（`deploy/k8s.yaml`，按 Zeabur 面板约定的标签和命名，面板可识别、可编辑），Secret 为 `pjsk-meta-builder-env`。自检 8/8 通过（§9 Q6）。
+- 之后的更新和 StarMoe 其他项目一样：标准模板 `deploy.yml` 在 main 推送后构建 12 位 sha 镜像，经 `hack/bump.sh` 通知 Ferry 滚动更新；环境变量和资源在面板里改。
 
 ## 9. 未决项与待验证
 
@@ -462,7 +462,7 @@ X-Moe-Signature: sha256=<hex(HMAC_SHA256(secret, timestamp + "." + body))>
 | Q3 | Nuverse 服 API 请求实际用 [0] 还是 [1] | 等同步服务拿到 cn 账号 accessToken、实测 `user/auth` 时确认；不影响 builder |
 | Q4 | ~~QooApp 上 jp 的分包里，`assets/bin/Data` 是否完整在主包~~ | **已解决（M4）**：jp 7.1.0 从 QooApp 下载为主包 + 2 个拆分包，按虚拟文件系统查找即可，结果与 workflow Release 包完全一致 |
 | Q5 | AssetsTools.NET 读取没有 typetree 的 MonoBehaviour | 按 §5.3 的固定字段顺序手工读；用 jp 7.1.0、cn 6.4.1 的结果与 workflow（Python）对照 |
-| Q6 | JP2 出网 | 部署前测试 cn 官网链接（`pjskyy.ugurl.cn` → `ugapk.com` → `lf9-apk.ugapk.cn`）、QooApp（`api.qoo-app.com`、`d*.qoo-apk.com`）、GitHub API |
+| Q6 | ~~JP2 出网~~ | **已解决**：2026-11-11 在 JP2 上自检 8/8 通过，cn 官网链接（`lf9-apk.ugapk.cn`）、QooApp 四个区服（`api.qoo-app.com`、`d3`/`d7.qoo-apk.com`）、GitHub App 都可直连 |
 | Q7 | QooApp token 的有效期 | 本机 token（2026-10-09 保存）在 2026-11-10 仍有效；失效时报凭据错误（退出码 78），同步服务应告警而不是重试 |
 
 ## 10. 测试

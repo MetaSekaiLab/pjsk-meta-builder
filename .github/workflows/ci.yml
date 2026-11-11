@@ -25,8 +25,10 @@ jobs:
       # 样本安装包测试没有环境变量时自动跳过（安装包不进仓库）
       - run: dotnet test --nologo
 
+  # main 的镜像由 deploy.yml 构建并通知 Ferry；这里只在 PR 上试构建、在 v* 标签上发版本镜像
   image:
     needs: test
+    if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -45,9 +47,8 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=sha,format=short
             type=semver,pattern={{version}}
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
       # 编译阶段在构建机平台上跑，最终阶段只有 COPY，多架构不需要 QEMU
       - uses: docker/build-push-action@v6
         with:

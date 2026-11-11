@@ -1,6 +1,6 @@
 # 部署
 
-镜像：`ghcr.io/metasekailab/pjsk-meta-builder`（CI 在 main 分支和 `v*` 标签上构建，amd64 + arm64）。
+镜像：`ghcr.io/metasekailab/pjsk-meta-builder`。main 分支由 `deploy.yml` 构建，标签为 12 位 commit sha 和 `main`（amd64）；`v*` 标签由 `ci.yml` 构建版本号和 `latest`（amd64 + arm64）。
 默认命令 `serve`，监听 `PORT`（默认 8080），只往 `/tmp` 写。
 
 ## 必需的 Secret
@@ -41,4 +41,32 @@ curl http://pjsk-meta-builder.apps.svc.cluster.local:8080/healthz
 
 其余接口需要签名，见设计文档 §7。
 
-[k8s.yaml](k8s.yaml) 是通用参考；用面板部署时按同样的镜像、环境变量和资源设置填写。
+## 首次创建（kubectl）
+
+[k8s.yaml](k8s.yaml) 里是 Deployment 和 Service，标签和命名按 Zeabur 面板的约定，建好后面板能把它们识别成一个服务，可以正常改变量、看日志、回滚。
+
+1. 准备一个 env 文件，一行一个 `KEY=VALUE`，不要加引号。`GITHUB_APP_PRIVATE_KEY` 填单行 base64。用完删掉这个文件。
+2. 创建 Secret 和服务。**用 `create`，不要用 `apply`**：`apply` 会在对象上留下 `last-applied-configuration` 注解，Secret 的值会以明文存在注解里；以后再 `apply` 一次，还会把 Ferry 和面板改过的东西覆盖回去。
+
+```sh
+kubectl -n apps create secret generic pjsk-meta-builder-env --from-env-file=builder.env
+kubectl -n apps label secret pjsk-meta-builder-env app.kubernetes.io/name=pjsk-meta-builder
+# 先把 k8s.yaml 里的镜像标签换成一个已存在的 12 位 sha 标签
+kubectl -n apps create -f k8s.yaml
+kubectl -n apps rollout status deploy/pjsk-meta-builder
+kubectl -n apps logs deploy/pjsk-meta-builder | grep 自检
+```
+
+也可以不落文件：在本机把这些行通过 ssh 管道传过去，服务器上用 `--from-env-file=/dev/stdin`。
+
+不要用 `--from-file` 建 Secret：文件末尾的换行会一起存进去，`MOE_HMAC_SECRET` 多一个换行，签名就对不上。
+
+建好之后集群里的对象就是准的：镜像由 CI 更新，变量和资源在面板里改，这个文件不再应用到集群。
+
+## 自动更新
+
+和 StarMoe 下其他项目一样，用标准模板 [`deploy.yml`](../.github/workflows/deploy.yml)，不要改它：推送到 main 后构建镜像，再用 `CNB_TOKEN` 运行 infra 仓库里的 `hack/bump.sh` 通知 Ferry。Ferry 会把所有使用这个镜像的工作负载换成新的 12 位 sha 标签，只改镜像，不动环境变量和资源。
+
+这个仓库不在 StarMoe-org 下，继承不到组织级的 `CNB_TOKEN`，需要在仓库设置里单独添加这个 Secret。
+
+想临时固定某个版本：给 Deployment 加注解 `ferry.star.moe/auto-deploy: "false"`。

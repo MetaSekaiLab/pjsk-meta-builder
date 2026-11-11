@@ -1,35 +1,36 @@
 # pjsk-meta-builder 部署参考（设计文档 §8）。只在集群内网提供，不建 Ingress。
-# Secret 需事先创建（不要提交真实值）：
-#   kubectl -n apps create secret generic pjsk-meta-builder \
-#     --from-literal=MOE_HMAC_SECRET=... \
-#     --from-literal=GITHUB_APP_ID=... \
-#     --from-file=GITHUB_APP_PRIVATE_KEY=app.pem \
-#     --from-literal=QOOAPP_TOKEN=...
+# 只用于首次创建：kubectl create -f，不要 apply（见 deploy/README.md）。之后镜像标签由 CI 通知 Ferry 更新，
+# 配置在 Zeabur 面板里改，以集群里的现状为准，不再把这个文件应用到集群。
+# 标签和命名按 Zeabur 面板的约定（app.kubernetes.io/name、<服务名>-env、端口名 http），面板能识别成一个服务。
+# Secret pjsk-meta-builder-env 需事先创建（不要提交真实值），见 deploy/README.md。
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: pjsk-meta-builder
   namespace: apps
+  labels: { app.kubernetes.io/name: pjsk-meta-builder }
 spec:
   replicas: 1                      # 任务状态在内存里、同一时间只跑一个任务：只能单副本
   strategy:
     type: Recreate
   selector:
-    matchLabels: { app: pjsk-meta-builder }
+    matchLabels: { app.kubernetes.io/name: pjsk-meta-builder }
   template:
     metadata:
-      labels: { app: pjsk-meta-builder }
+      labels: { app.kubernetes.io/name: pjsk-meta-builder }
     spec:
+      automountServiceAccountToken: false   # 不访问 k8s API
       securityContext:
         runAsNonRoot: true
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: pjsk-meta-builder
-          image: ghcr.io/metasekailab/pjsk-meta-builder:sha-XXXXXXX   # 用固定的 sha 标签，不用 latest
+          image: ghcr.io/metasekailab/pjsk-meta-builder:<12 位 commit sha>   # 用固定的 sha 标签，不用 latest
           ports:
-            - containerPort: 8080
+            - name: http
+              containerPort: 8080
           envFrom:
-            - secretRef: { name: pjsk-meta-builder }
+            - secretRef: { name: pjsk-meta-builder-env }
           env:
             - name: APP_META_REPO
               value: StarMoe-org/moesekai-app-meta
@@ -58,9 +59,11 @@ kind: Service
 metadata:
   name: pjsk-meta-builder
   namespace: apps
+  labels: { app.kubernetes.io/name: pjsk-meta-builder }
 spec:
   type: ClusterIP
-  selector: { app: pjsk-meta-builder }
+  selector: { app.kubernetes.io/name: pjsk-meta-builder }
   ports:
-    - port: 8080
-      targetPort: 8080
+    - name: http
+      port: 8080
+      targetPort: http
