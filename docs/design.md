@@ -1,6 +1,6 @@
 # pjsk-meta-builder 设计文档
 
-> 状态：M1–M5 已实现并部署到 JP2；M6（主动发现新安装包）已实现，待部署
+> 状态：M1–M6 已实现并部署到 JP2（M6 于 2026-11-12 开启：`PJSK_WATCH=1`、`SYNC_CALLBACK_URL`）
 > 代码仓库：`MetaSekaiLab/pjsk-meta-builder`（公开）
 > 产物仓库：`StarMoe-org/moesekai-app-meta`（公开）
 > 最后更新：2026-11-11
@@ -439,6 +439,7 @@ X-Moe-Signature: sha256=<hex(HMAC_SHA256(secret, timestamp + "." + body))>
 - Google Play 网页是 Google 的内部数据格式，解析失败只记告警、把这个来源标成失效，不影响其他来源。2026-11-11 从本机和 JP2 实测四个包都能取到（每次约 0.3 秒，无需凭据）。匿名 playfetch 不用：依赖第三方公共账号池，本机实测被 Cloudflare 拦截。
 - 只在发布结果为 `advanced` 时通知同步服务（§7.6）；`snapshot_only` / `noop` / `rejected` 只写日志。
 - 自检增加「Google Play（jp/en/hmt/kr）」四项；cn 官网一项同时显示文件名里的 versionCode。
+- 2026-11-12 JP2 上线（`5a2b0479c4ce`）：九个来源约 3 秒查完、版本都与 latest.json 一致；自检 12/12 通过（含 Google Play 四项）。builder 发起任务后回调同步服务这条路还没在线上实际走过（要等真实的新版本）。
 - 2026-11-12 本机实测：九个来源（四服 QooApp + Google Play、cn 官网）约 3 秒查完，版本都与 app-meta 的 latest.json 一致，没有发起任务。
 
 ### 7.6 和同步服务的配合
