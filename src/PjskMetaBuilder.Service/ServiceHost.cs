@@ -43,6 +43,14 @@ public static class ServiceHost
             builder.Services.AddSingleton<IJobRunner, PipelineRunner>();
         builder.Services.AddSingleton<JobQueue>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<JobQueue>());
+        if (options.Watch)
+        {
+            builder.Services.AddSingleton(new WatchOptions { Regions = options.WatchRegions ?? new WatchOptions().Regions });
+            builder.Services.AddSingleton<IVersionProbes>(sp => new HttpVersionProbes(options));
+            builder.Services.AddSingleton(sp => new Watcher(sp.GetRequiredService<IVersionProbes>(), sp.GetRequiredService<JobQueue>(),
+                sp.GetRequiredService<WatchOptions>(), sp.GetRequiredService<ILogger<Watcher>>()));
+            builder.Services.AddHostedService<WatcherService>();
+        }
         builder.Services.AddSingleton<SelfTestState>();
         if (Environment.GetEnvironmentVariable("PJSK_SELFTEST") == "1")
             builder.Services.AddHostedService<StartupSelfTest>();
@@ -57,6 +65,7 @@ public static class ServiceHost
             version = MetaBuilder.BuilderVersion,
             pending = queue.Pending,
             running = queue.Running is not null,
+            watch = options.Watch,
             selfTest = selfTest.Results is { } r
                 ? new { passed = r.Count(x => x.Ok), total = r.Count, failed = r.Where(x => !x.Ok).Select(x => x.Name), at = selfTest.At }
                 : null,

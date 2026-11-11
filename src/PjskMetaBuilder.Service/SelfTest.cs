@@ -40,9 +40,19 @@ public static class SelfTest
         }
         results.Add(Check("cn 官网链接", () =>
         {
-            var (final, total) = new OfficialUrlSource().Probe(Regions.Get("cn"));
-            return $"{final.Host}，{total >> 20} MB";
+            var source = new OfficialUrlSource();
+            var (final, total) = source.Probe(Regions.Get("cn"));
+            var code = OfficialUrlSource.VersionCodeFromFileName(Path.GetFileName(final.AbsolutePath));
+            return $"{final.Host}，{total >> 20} MB，文件名里的 versionCode {(code is { } c ? c.ToString() : "没找到")}";
         }));
+        foreach (var code in GooglePlayPage.Storefronts.Keys)
+        {
+            results.Add(Check($"Google Play（{code}）", () =>
+            {
+                var g = new GooglePlayPage().Probe(Regions.Get(code));
+                return $"{g.VersionName}" + (g.UpdatedAt is { } t ? $"，更新于 {t:yyyy-MM-dd}" : "");
+            }));
+        }
         results.Add(Check("GitHub App", () =>
         {
             if (options.GitHubAppId is null || options.GitHubAppPrivateKey is null)

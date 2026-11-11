@@ -8,7 +8,7 @@ namespace PjskMetaBuilder.Core.Sources;
 /// 缓存目录按最终文件名区分（文件名里带版本号），同名且大小一致就复用。官网不给 MD5，完整性由大小 + 之后的清单解析保证。
 /// 版本号要下载后读清单才知道，所以“来源还没更新”由 MetaBuilder 在读清单时判断。
 /// </summary>
-public sealed class OfficialUrlSource(HttpClient? http = null, Action<string>? log = null) : IPackageSource
+public sealed partial class OfficialUrlSource(HttpClient? http = null, Action<string>? log = null) : IPackageSource
 {
     private readonly Downloader _downloader = new(http ?? Downloader.CreateClient(), log);
 
@@ -22,6 +22,23 @@ public sealed class OfficialUrlSource(HttpClient? http = null, Action<string>? l
         var (final, total) = _downloader.ProbeRange(new Uri(url));
         return (final, total ?? throw new HttpRequestException("官网链接没有返回文件大小"));
     }
+
+    /// <summary>
+    /// 只探测版本（§7.5）：最终文件名形如 <c>pjsk_51199071a_v23509_4647_277c_1792657704.apk</c>，
+    /// <c>_v&lt;数字&gt;_</c> 后面那段就是 versionCode（2026-11-12 与 app-meta 的 cn 6.4.1 = 4647 对照一致）。
+    /// 文件名不符合这个格式时返回 null（调用方只记告警）。
+    /// </summary>
+    public (Uri Final, long? VersionCode) ProbeVersion(RegionInfo region)
+    {
+        var (final, _) = Probe(region);
+        return (final, VersionCodeFromFileName(Path.GetFileName(final.AbsolutePath)));
+    }
+
+    [System.Text.RegularExpressions.GeneratedRegex(@"_v\d+_(\d+)_")]
+    private static partial System.Text.RegularExpressions.Regex VersionCodePattern();
+
+    public static long? VersionCodeFromFileName(string fileName) =>
+        VersionCodePattern().Match(fileName) is { Success: true } m && long.TryParse(m.Groups[1].Value, out var code) ? code : null;
 
     public DownloadedPackage Fetch(RegionInfo region, string cacheDir, long? expectedVersionCode)
     {

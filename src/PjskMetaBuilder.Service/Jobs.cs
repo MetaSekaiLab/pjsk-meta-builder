@@ -11,8 +11,11 @@ public sealed record BuildJobRequest(
     string Region,
     string? Source,
     long? ExpectedVersionCode,
-    string Callback)
+    string? Callback)
 {
+    /// <summary>builder 自己的轮询器发起的任务（§7.5）：requestId 以 auto- 开头。</summary>
+    public bool IsAuto => RequestId.StartsWith("auto-", StringComparison.Ordinal);
+
     private static readonly Regex IdPattern = new("^[A-Za-z0-9._:-]{1,64}$", RegexOptions.Compiled);
 
     /// <summary>校验通过返回 null，否则返回给调用方的错误说明。</summary>
@@ -30,8 +33,8 @@ public sealed record BuildJobRequest(
             return $"{Region} 没有官网链接";
         if (ExpectedVersionCode is <= 0)
             return "expectedVersionCode 必须是正整数";
-        if (!Uri.TryCreate(Callback, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
-            return "callback 必须是 http(s) 绝对地址";
+        if (Callback is not null && (!Uri.TryCreate(Callback, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https")))
+            return "callback 必须是 http(s) 绝对地址（可省略：省略时用 SYNC_CALLBACK_URL）";
         return null;
     }
 }

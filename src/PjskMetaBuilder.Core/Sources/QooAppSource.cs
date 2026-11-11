@@ -27,6 +27,8 @@ public sealed record QooAppCredentials(string Token, string? UserId = null, stri
     }
 }
 
+public sealed record QooAppVersion(string VersionName, long VersionCode, bool Ready);
+
 public sealed record QooAppProbe(string VersionName, long VersionCode, string BaseHost, long? BaseSize, string? SplitHost);
 
 /// <summary>
@@ -99,6 +101,20 @@ public sealed class QooAppSource(QooAppCredentials credentials, HttpClient? http
             splitHost = _downloader.ProbeRange(new Uri(splits[0].GetProperty("url").GetString()!), UserAgent).Final.Host;
         return new QooAppProbe(apk.GetProperty("versionName").GetString() ?? "", apk.GetProperty("versionCode").GetInt64(),
             baseFinal.Host, baseSize, splitHost);
+    }
+
+    /// <summary>只查条目（一个 API 请求），给轮询器判断有没有新版本用（§7.5）。不碰安装包文件。</summary>
+    public QooAppVersion Current(RegionInfo region)
+    {
+        if (region.QooAppId is not { } appId)
+            throw new ArgumentException($"{region.Code} 没有 QooApp 条目");
+        var detail = Detail(appId);
+        var package = detail.GetProperty("packageId").GetString();
+        if (package != region.Package)
+            throw new DataException($"QooApp 条目 {appId} 的包名是 {package}，但 {region.Code} 应该是 {region.Package}");
+        var apk = detail.GetProperty("apk");
+        var ready = !(detail.TryGetProperty("isApkReady", out var r) && r.ValueKind == JsonValueKind.False);
+        return new QooAppVersion(apk.GetProperty("versionName").GetString() ?? "", apk.GetProperty("versionCode").GetInt64(), ready);
     }
 
     private static string UserAgent => $"QooApp {ClientVersion}";

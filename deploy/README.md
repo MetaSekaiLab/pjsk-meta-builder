@@ -13,6 +13,14 @@
 
 可选：`APP_META_REPO`（默认 `StarMoe-org/moesekai-app-meta`）、`QOOAPP_USER_ID`、`QOOAPP_DEVICE_ID`、`PJSK_SELFTEST=1`（启动后跑一次出网自检）。
 
+主动发现（设计文档 §7.5）：
+
+| 变量 | 说明 |
+| --- | --- |
+| `PJSK_WATCH=1` | 启用轮询器（默认关）：cn 官网 10 分钟、QooApp 和 Google Play 15 分钟检查一次，发现比 app-meta 新的版本就自己发起任务 |
+| `PJSK_WATCH_REGIONS` | 逗号分隔，默认全部五个区服 |
+| `SYNC_CALLBACK_URL` | 自己发起的任务发布结果为 advanced 时、以及请求里没给 `callback` 时的回调地址；JP2 上填 `http://moesekai-masterdata-sync.apps.svc.cluster.local:8080/v1/app-meta/callback` |
+
 `GITHUB_APP_PRIVATE_KEY` 可以填原样 PEM、把换行写成 `\n` 的 PEM，或整个 PEM 文件的 base64（面板不支持多行时用这种）：
 
 ```sh
@@ -27,11 +35,11 @@ base64 < app.pem | tr -d '\n'
 
 ## 出网
 
-需要能访问：`api.github.com`、`api.qoo-app.com`、`*.qoo-apk.com`、`pjskyy.ugurl.cn` → `ugapk.com` → `*.ugapk.cn`。
+需要能访问：`api.github.com`、`raw.githubusercontent.com`、`play.google.com`、`api.qoo-app.com`、`*.qoo-apk.com`、`pjskyy.ugurl.cn` → `ugapk.com` → `*.ugapk.cn`。
 
 ## 自检
 
-设 `PJSK_SELFTEST=1` 启动后，日志里会逐项打印 `自检 OK` / `自检 FAIL`：Il2CppDumper、工作目录、QooApp（jp/en/hmt/kr）、cn 官网链接、GitHub App。
+设 `PJSK_SELFTEST=1` 启动后，日志里会逐项打印 `自检 OK` / `自检 FAIL`：Il2CppDumper、工作目录、QooApp（jp/en/hmt/kr）、cn 官网链接（含文件名里的 versionCode）、Google Play（jp/en/hmt/kr）、GitHub App。
 每一项只查接口或取 1 个字节，不下载安装包、不写产物仓库。`/healthz` 里的 `selfTest` 字段给出通过数和失败项。
 也可以在容器里手动跑：`dotnet /opt/app/pjsk-meta-builder.dll selftest`。
 

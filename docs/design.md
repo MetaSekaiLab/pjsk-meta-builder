@@ -1,6 +1,6 @@
 # pjsk-meta-builder 设计文档
 
-> 状态：M1–M5 已实现并部署到 JP2；M6（主动发现新安装包）设计中
+> 状态：M1–M5 已实现并部署到 JP2；M6（主动发现新安装包）已实现，待部署
 > 代码仓库：`MetaSekaiLab/pjsk-meta-builder`（公开）
 > 产物仓库：`StarMoe-org/moesekai-app-meta`（公开）
 > 最后更新：2026-11-11
@@ -422,21 +422,24 @@ X-Moe-Signature: sha256=<hex(HMAC_SHA256(secret, timestamp + "." + body))>
 - 回调在后台重试，不占用下一个任务。
 - 任务状态只在内存里（保留最近 200 个已结束任务），重启后丢失；同步服务收不到回调时会重新发起或检查仓库。
 
-### 7.5 主动发现新安装包（M6，设计中）
+### 7.5 主动发现新安装包（M6）
 
 服务里加一个后台轮询器，按区服查安装包来源，和产物仓库的 `<region>/latest.json` 比较；有更新就往现有的单任务队列里放一个任务（和同步服务发来的请求走同一条路：同一地区不重复、同一时间只跑一个）。builder 自己不存状态，基准永远是产物仓库。
 
 | 来源 | 区服 | 间隔（默认） | 能拿到 | 判定为新版本 |
 | --- | --- | --- | --- | --- |
 | 官网链接 | cn | 10 分钟 | 跟随重定向、只取 1 字节，从文件名（`pjsk_…_v23509_4647…apk`）读 versionCode | versionCode 大于 latest 的 `package.versionCode` |
-| QooApp 详情 | jp / en / hmt / kr | 15 分钟 | versionName、versionCode、是否可下载（`Probe`） | versionCode 更大，或 versionName 更大 |
-| Google Play 网页 | jp / en / hmt / kr | 15 分钟 | `play.google.com/store/apps/details?id=…` 内嵌数据 `ds:5` 里的 versionName、最后更新时间；**没有 versionCode**；cn 不在 Google Play 上 | versionName 更大 → 作为提前信号发起任务，下载仍走 QooApp |
+| QooApp 详情 | jp / en / hmt / kr | 15 分钟 | versionName、versionCode、是否可下载（只查条目，`QooAppSource.Current`，不碰文件） | versionCode 更大，或 versionName 更大，且已可下载 |
+| Google Play 网页 | jp / en / hmt / kr | 15 分钟 | `play.google.com/store/apps/details?id=…&gl=<地区>` 内嵌数据 `ds:5` 里的 versionName、最后更新时间；**没有 versionCode**；各服要用自己的商店地区（jp→JP、en→US、hmt→TW、kr→KR；hmt、kr 在美区页面上没有数据）；cn 不在 Google Play 上 | versionName 更大 → 提前信号：立即复查 QooApp，下载仍走 QooApp |
 
 - 间隔都加 ±10% 随机抖动，可用环境变量调整；某个来源连续失败时单独退避（最长 2 小时），不影响其他来源。
-- Google Play 先于 QooApp 看到新版本时，任务会以 `not_ready` 结束；轮询器对这个区服退避后再发（10 分钟起，翻倍，最长 2 小时），直到 QooApp 上架或版本追平。`not_ready` 不回调同步服务（不是它发起的，也没有新产物）。
+- Google Play 先于 QooApp 看到新版本时（实现时改定）：**不发起任务**，轮询器立即复查一次 QooApp；没跟上就按退避复查 QooApp（10 分钟起，翻倍，最长 2 小时），QooApp 跟上后再发起任务。这样不会空跑一个以 `not_ready` 结束的任务。这个「领先」标记要等 `latest.json` 追上才清除，避免任务发布前 Google Play 反复触发。
+- 任务带 `expectedVersionCode`（官网文件名或 QooApp 的 versionCode），`callback` 为空、用 `SYNC_CALLBACK_URL`。同一 (区服, versionCode) 触发后 2 小时内不再触发：`latest.json` 经 GitHub raw 读取，可能有几分钟缓存，避免这期间重复下载；任务失败（比如网络）时，冷却期过后会再试。
+- 平时安静：各来源第一次查到、或观察到的版本变化时才记一条日志。
 - Google Play 网页是 Google 的内部数据格式，解析失败只记告警、把这个来源标成失效，不影响其他来源。2026-11-11 从本机和 JP2 实测四个包都能取到（每次约 0.3 秒，无需凭据）。匿名 playfetch 不用：依赖第三方公共账号池，本机实测被 Cloudflare 拦截。
 - 只在发布结果为 `advanced` 时通知同步服务（§7.6）；`snapshot_only` / `noop` / `rejected` 只写日志。
-- 自检加一项「Google Play」。
+- 自检增加「Google Play（jp/en/hmt/kr）」四项；cn 官网一项同时显示文件名里的 versionCode。
+- 2026-11-12 本机实测：九个来源（四服 QooApp + Google Play、cn 官网）约 3 秒查完，版本都与 app-meta 的 latest.json 一致，没有发起任务。
 
 ### 7.6 和同步服务的配合
 
@@ -451,7 +454,7 @@ X-Moe-Signature: sha256=<hex(HMAC_SHA256(secret, timestamp + "." + body))>
 | `GITHUB_APP_ID`、`GITHUB_APP_PRIVATE_KEY` | Secret | StarMoe-org 的 App，与同步服务共用 |
 | `MOE_HMAC_SECRET`（或 `_FILE`） | Secret | 与同步服务共用，至少 32 个字符，不够时拒绝启动 |
 | `QOOAPP_TOKEN`（或 `QOOAPP_TOKEN_FILE`） | Secret | jp、en、hmt、kr 下载；可选 `QOOAPP_USER_ID`、`QOOAPP_DEVICE_ID` |
-| `SYNC_CALLBACK_URL` | 配置 | 自己发起的任务完成后通知同步服务的地址（§7.6，M6） |
+| `SYNC_CALLBACK_URL` | 配置 | 自己发起的任务完成后、以及请求里没给 `callback` 时，通知同步服务的地址（§7.6，M6）；JP2 上为 `http://moesekai-masterdata-sync.apps.svc.cluster.local:8080/v1/app-meta/callback` |
 | `PJSK_WATCH`、`PJSK_WATCH_REGIONS` | 配置 | 是否启用主动轮询、轮询哪些区服（M6；默认关，部署时打开） |
 | `PJSK_CACHE_DIR` | 配置 | 命令行的下载缓存目录（服务不用，见 §7.4） |
 | `PJSK_WORK_ROOT`、`PORT` | 配置 | 服务的任务临时目录（镜像默认 `/tmp/pjsk-meta-jobs`）和端口（默认 8080） |

@@ -18,6 +18,11 @@ public sealed record ServiceOptions
     /// <summary>回调失败后的重试间隔（§7.2：10 秒、30 秒、2 分钟）。</summary>
     public IReadOnlyList<TimeSpan> CallbackRetryDelays { get; init; } =
         [TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(30), TimeSpan.FromMinutes(2)];
+    /// <summary>SYNC_CALLBACK_URL：请求里没给回调地址、以及轮询器发起的任务完成后通知同步服务的地址（§7.6）。</summary>
+    public string? SyncCallbackUrl { get; init; }
+    /// <summary>PJSK_WATCH=1 时启用主动发现（§7.5）；PJSK_WATCH_REGIONS 逗号分隔，默认全部区服。</summary>
+    public bool Watch { get; init; }
+    public IReadOnlyList<string>? WatchRegions { get; init; }
     /// <summary>内存里保留的已结束任务数（GET /v1/builds/{id} 排查用）。</summary>
     public int KeepFinishedJobs { get; init; } = 200;
 
@@ -43,6 +48,15 @@ public sealed record ServiceOptions
             Il2CppDumperDll = Env("IL2CPPDUMPER_DLL"),
             DotnetHost = Env("PJSK_DOTNET"),
             WorkRoot = Env("PJSK_WORK_ROOT") ?? Path.Combine(Path.GetTempPath(), "pjsk-meta-jobs"),
+            SyncCallbackUrl = Env("SYNC_CALLBACK_URL") is { } cb
+                ? (Uri.TryCreate(cb, UriKind.Absolute, out var u) && u.Scheme is "http" or "https" ? cb
+                    : throw new ArgumentException("SYNC_CALLBACK_URL 必须是 http(s) 绝对地址"))
+                : null,
+            Watch = Env("PJSK_WATCH") == "1",
+            WatchRegions = Env("PJSK_WATCH_REGIONS") is { } wr
+                ? wr.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Select(r => Core.Regions.All.ContainsKey(r) ? r : throw new ArgumentException($"PJSK_WATCH_REGIONS：未知地区 {r}")).ToArray()
+                : null,
         };
     }
 }

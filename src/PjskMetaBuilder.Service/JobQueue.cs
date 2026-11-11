@@ -11,8 +11,8 @@ public enum EnqueueStatus { Accepted, Duplicate, RegionBusy }
 /// - 同一地区已有任务排队或在跑：拒绝（409），返回那个任务的 requestId，同步服务等它的回调即可。
 /// 任务状态只在内存里，重启后丢失。
 /// </summary>
-public sealed class JobQueue(IJobRunner runner, CallbackSender callbacks, ServiceOptions options, ILogger<JobQueue> logger)
-    : BackgroundService
+public sealed partial class JobQueue(IJobRunner runner, CallbackSender callbacks, ServiceOptions options, ILogger<JobQueue> logger)
+    : BackgroundService, IJobSink
 {
     private readonly Channel<BuildJob> _channel = Channel.CreateUnbounded<BuildJob>(new UnboundedChannelOptions { SingleReader = true });
     private readonly Dictionary<string, BuildJob> _jobs = new(StringComparer.Ordinal);
@@ -96,13 +96,34 @@ public sealed class JobQueue(IJobRunner runner, CallbackSender callbacks, Servic
                 }
             }
             // 回调在后台重试，不占用下一个任务（产物已在仓库，回调只是通知）
+            var target = CallbackTarget(job);
+            if (target is null)
+            {
+                lock (_lock)
+                    job.CallbackState = "skipped";
+                continue;
+            }
             _ = Task.Run(async () =>
             {
-                var delivered = await callbacks.SendAsync(job.Request.Callback, CallbackPayload.From(job), stoppingToken);
+                var delivered = await callbacks.SendAsync(target, CallbackPayload.From(job), stoppingToken);
                 lock (_lock)
                     job.CallbackState = delivered ? "delivered" : "gave_up";
             }, stoppingToken);
         }
+    }
+}
+
+public sealed partial class JobQueue
+{
+    /// <summary>
+    /// 回调地址（§7.6）：请求里给了就用请求里的，否则用 SYNC_CALLBACK_URL；都没有就不回调。
+    /// 轮询器自己发起的任务（auto-）只在发布结果为 advanced 时通知同步服务（不是它请求的，其他结果它不关心）。
+    /// </summary>
+    public string? CallbackTarget(BuildJob job)
+    {
+        if (job.Request.IsAuto && job.Outcome?.Result != "advanced")
+            return null;
+        return job.Request.Callback ?? options.SyncCallbackUrl;
     }
 }
 
